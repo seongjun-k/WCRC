@@ -1,0 +1,29 @@
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+
+# 사전학습 가중치 — ultralytics 가 필요할 때 다시 받는다
+yolov8s.pt
+yolo26n.pt
+
+# 학습·서버 산출물. 데이터셋(apple/, raw/)이 있으면 `wtrain` 으로 다시 만든다.
+# 단 실전에 쓰는 best.pt 하나만 예외로 커밋한다 (아래 !)
+runs/
+!runs/detect/train/weights/best.pt
+
+# 다른 팀 로봇(pinky_d835)에서 잘못 접속했다가 복구해 둔 사진.
+# 우리 데이터가 아니므로 저장소에 넣지 않는다.
+raw/images_d835/
+
+# 진단용으로 생성되는 이미지
+*_road.jpg
+*_stop.jpg
+road_check.jpg
+stop_check.jpg
+
+# 주피터 판 주행 코드 (drive.py 로 대체됨). 필요 없으면 지워도 된다.
+*.ipynb.superseded
+
+# LibreOffice 잠금 파일
+.~lock.*#
