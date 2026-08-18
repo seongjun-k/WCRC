@@ -37,7 +37,9 @@ class World:
     MAX_RANGE = 150.0     # 이보다 멀면 인식 실패
     DEG_PER_SEC = 212.0   # 실측: MOTOR_SPEED 90 에서 212도/초 (시간에 선형)
     TURN_SLIP = 0.9       # IMU 로 닫으므로 명령 각도의 90% 는 실제로 돈다고 본다
-    CM_PER_SEC = 43.792   # MOVE_FORWARD_PER_ONE
+    # 실제 전진 속도. drive.py 상수를 그대로 쓴다 — 예전엔 43.792 로 박아둬서
+    # drive.py 를 고쳐도 시뮬이 옛 속도로 돌았다.
+    CM_PER_SEC = drive.MOVE_FORWARD_PER_ONE
 
     def __init__(self):
         self.markers = {}
@@ -118,10 +120,27 @@ def install(world, counts, miss_every=0, vanish_after=0):
 
     # IMU 닫힌 회전. 실제로는 IMU 를 읽으며 도는데, 여기서는 명령 각도만큼
     # (약간의 오차를 섞어) 돌았다고 본다. 닫혀 있으니 시간 오차는 안 쌓인다.
+    def _turn_cost(deg):
+        """drive.py 의 turn_deg 가 실제로 쓰는 시간. 상수는 drive.py 에서 읽는다.
+
+        예전엔 |deg|/212 + 0.2 로 뭉갰는데, 실제로는 속도 clamp 때문에 더 느리고
+        coast 후 정지 대기(0.35초)와 오차 보정 회전이 붙는다. 랩타임을 줄이려면
+        이 모델이 맞아야 한다 — 8번 도는 코스라 회전이 제일 큰 비용이다.
+        """
+        speed = max(drive.TURN_MIN_SPEED,
+                    min(drive.TURN_MAX_SPEED,
+                        int(abs(deg) * drive.TURN_COAST_RATIO / drive.TURN_COAST_PER_SPEED)))
+        rate = World.DEG_PER_SEC * speed / drive.MOTOR_SPEED
+        target = max(0.0, abs(deg) - drive.TURN_COAST_PER_SPEED * speed)
+        return target / rate + drive.TURN_SETTLE_BASE + drive.TURN_SETTLE_PER_SPEED * speed
+
     def turn_deg(deg):
         actual = deg * World.TURN_SLIP
         world.turn(actual)
-        CLOCK.sleep(abs(deg) / World.DEG_PER_SEC + 0.2)
+        CLOCK.sleep(_turn_cost(deg))
+        err = deg - actual
+        if abs(err) > drive.TURN_TOL_DEG:          # drive.py 는 여기서 한 번 더 돈다
+            CLOCK.sleep(_turn_cost(err))
         return actual
 
     drive.move_forward, drive.move_backward = fwd, back
@@ -221,10 +240,18 @@ def demo():
     check_undefined_names()
 
     N = len(drive.target_list)
-    COUNTS = [2, 3, 2, 4, 4, 5, 1, 0, 1]      # 과수원 3곳 x 3장
-    EXPECT = 3 + 5 + 1                        # 각 3장의 최댓값 합
+    # 과수원 3곳 x APPLE_CHECK_COUNT 장. 각 묶음에 일부러 튀는 값을 하나씩 섞었다
+    # (오탐 1장, 누락 1장). drive.py 는 중앙값을 쓰므로 여기에 흔들리면 안 된다.
+    K = drive.APPLE_CHECK_COUNT
+    GROUPS = [[1, 1, 2, 1, 1],      # 오탐 1장 -> 정답 1
+              [3, 3, 3, 4, 3],      # 오탐 1장 -> 정답 3
+              [2, 2, 2, 2, 0]][:3]  # 누락 1장 -> 정답 2
+    GROUPS = [(g * K)[:K] if len(g) < K else g[:K] for g in GROUPS]
+    COUNTS = [c for g in GROUPS for c in g]
+    EXPECT = sum(sorted(g)[len(g) // 2] for g in GROUPS)
     ERR = [10, -15, 20, -10, 15, -20, 10, -15, 5, 0][:N]
-    DIST = [120, 110, 130, 110, 130, 110, 130, 110, 100, 100][:N]
+    # map.png 실측 구간거리(cm) + 마커는 정지점보다 pose[1] 만큼 더 앞
+    DIST = [t["cm"] + t["pose"][1] for t in drive.target_list]
     assert sum(1 for a in drive.after_track_list
                for act, _ in a["actions"] if act == drive.APPLE_COUNT_ACTION) == 3, \
         "사과를 세는 지점이 3곳(과수원 A·B·C)이 아니다"
@@ -242,6 +269,28 @@ def demo():
     run(big, DIST, list(COUNTS))
     assert drive.total_apple_count == EXPECT, f"회전 어긋남에서 사과 {drive.total_apple_count}"
     print(f"OK  회전 ±50도 어긋나도 회수 · 사과 {drive.total_apple_count}개 · 가상 {CLOCK.time():.0f}초")
+
+    # 멀리 있는 마커를 목표 id 로 잘못 읽는 상황. drive.py 는 Z_ACCEPT_MAX 밖을
+    # 무시해야 하고, 무시한 뒤에도 진짜 마커를 찾아 완주해야 한다.
+    CLOCK.t = 0.0
+    world = World()
+    LCD = install(world, list(COUNTS))
+    drive.total_apple_count = 0
+    far = drive.Z_ACCEPT_MAX + 40
+    seen = {"n": 0}
+    real_detect = world.visible
+    def ghost():
+        # 앞의 몇 프레임은 "목표 id 가 아주 멀리 보인다" 고 거짓말한다
+        seen["n"] += 1
+        if seen["n"] <= 6:
+            return [[drive.target_list[0]["id"], 0.0, 0.0, far]]
+        return real_detect()
+    world.visible = ghost
+    world.markers = {drive.target_list[0]["id"]: [0, DIST[0]]}
+    ok, _ = drive.find_aruco(drive.target_list[0]["id"], drive.RIGHT, drive.SEARCH_COUNT)
+    assert ok, "먼 오인식을 걸러낸 뒤 진짜 마커를 못 찾았다"
+    assert seen["n"] > 6, "먼 오인식을 그대로 받아들였다"
+    print("OK  멀리 있는 마커 오인식을 무시하고 진짜를 찾는다")
 
     CLOCK.t = 0.0
     run(ERR, DIST, list(COUNTS), decoys={0: (7, 5), 1: (8, -5), 2: (7, 5)})

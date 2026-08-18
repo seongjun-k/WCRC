@@ -95,7 +95,7 @@ def train(epochs=80):
     """RTX 4060 Laptop(8GB) 기준 설정."""
     from ultralytics import YOLO
 
-    YOLO("yolov8s.pt").train(
+    r = YOLO("yolov8s.pt").train(
         data=DATA_YAML,
         epochs=int(epochs),
         imgsz=640,   # 서버가 imgsz 지정 없이 추론하므로 기본값 640 에 맞춘다
@@ -105,7 +105,18 @@ def train(epochs=80):
         lr0=0.001,        # 소량 데이터 + 소형 객체: 학습률 낮춤
         freeze=10,        # backbone 동결 — COCO 특징 보존, 헤드만 학습
     )
-    print("\nbest.pt -> runs/detect/train/weights/best.pt")
+
+    # ultralytics 는 실행할 때마다 train, train-2, train-3 ... 으로 새 폴더를 만든다.
+    # 서버(tools/serve.py)와 wcheck 는 train/weights/best.pt 고정 경로를 보므로
+    # 여기서 실제로 복사해 줘야 한다.
+    # (예전엔 이 줄이 print 만 하고 복사를 안 해서, 재학습을 해도 계속 옛 모델이
+    #  쓰이고 있었다. 성능이 안 바뀌면 제일 먼저 의심할 것.)
+    src = os.path.join(str(r.save_dir), "weights", "best.pt")
+    dst = os.path.join(ROOT, "runs", "detect", "train", "weights", "best.pt")
+    if os.path.abspath(src) != os.path.abspath(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+    print(f"\n{src} -> {dst}")
 
 
 def check(model_path="runs/detect/train/weights/best.pt", conf=0.25):

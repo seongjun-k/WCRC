@@ -14,6 +14,7 @@
 import glob
 import os
 import sys
+import inspect
 import types
 
 import cv2
@@ -96,11 +97,14 @@ def _check_move_forward_on_road():
     g.time = types.SimpleNamespace(sleep=slept.append)
     g.move_forward = lambda t, sp=90: plain.append(t)
 
-    # 긴 전진: 0.25초씩 쪼개져야 한다
+    # 긴 전진: step 크기로 쪼개져야 한다 (상수는 drive.py 가 정한다)
+    step = inspect.signature(g.move_forward_on_road).parameters["step"].default
     g.move_forward_on_road(1.0)
     assert not plain, "긴 전진인데 조향 없는 move_forward 로 빠졌다"
     assert abs(sum(slept) - 1.0) < 1e-9, f"전진 시간 합계가 {sum(slept)} (1.0 이어야)"
-    assert len(slept) == 4, f"1.0초가 {len(slept)}조각 (0.25초씩 4조각이어야)"
+    import math
+    assert len(slept) == math.ceil(1.0 / step), \
+        f"1.0초가 {len(slept)}조각 ({step}초씩이면 {math.ceil(1.0/step)}조각이어야)"
     driving = [m for m in moves if m != (0, 0)]
     assert driving, "모터에 전진 명령이 없다"
     for l, r in driving:
@@ -110,8 +114,9 @@ def _check_move_forward_on_road():
 
     # 짧은 전진: 조향하지 않고 그대로 직진
     moves.clear(); slept.clear(); plain.clear()
-    g.move_forward_on_road(0.2)
-    assert plain == [0.2], f"짧은 전진이 직진으로 안 빠졌다: {plain}"
+    short = g.ROAD_MIN_STEER_TIME / 2
+    g.move_forward_on_road(short)
+    assert plain == [short], f"짧은 전진이 직진으로 안 빠졌다: {plain}"
     assert not moves, "짧은 전진인데 조향 명령이 나갔다"
     print("move_forward_on_road: 분할·클램프·짧은전진 예외 OK")
 

@@ -27,3 +27,10 @@ stop_check.jpg
 
 # LibreOffice 잠금 파일
 .~lock.*#
+
+# 라벨 확인용 contact sheet (wlook 이 매번 새로 만든다)
+labelcheck/
+redlabel_check.jpg
+
+# ultralytics 가 만드는 데이터셋 캐시
+*.cache
