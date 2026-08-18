@@ -24,6 +24,7 @@
 PC 쪽 검증:  python tools/sim_drive.py   /   python tools/road.py
 둘 다 이 파일을 그대로 읽어서 돌린다. 여기를 고치면 같이 검증된다.
 """
+import math
 import os
 import sys
 import threading
@@ -87,7 +88,8 @@ TURN_DEG_PER_SEC = 212
 
 SEARCH_STEP_DEG = 6        # 탐색 한 스텝의 회전 각도. 대기가 없어져 잘게 돌 수 있다
 SEARCH_SCAN_SPEED = 25     # 탐색 회전 속도. 낮을수록 흔들림이 적고 덜 지나친다
-MATCH_STEP_DEG = 6         # 각도 정렬에서 한 번에 도는 각도
+MATCH_MAX_DEG = 30         # 정렬 회전 1회 상한. 계산이 틀렸을 때 크게 안 틀어지게
+MATCH_MIN_DEG = 2          # 이보다 작으면 coast 에 묻히므로 돌지 않는다         # 각도 정렬에서 한 번에 도는 각도
 MATCH_FORWARD_TIME = 0.4
 
 SLEEP_TIME_AFTER_MOVE = 0.08
@@ -255,7 +257,7 @@ target_list = [
     #
     # 마커10 은 교차로4 에서 9cm 간 지점에서 잡히고(hop 19), 그 hop 이 끝나는 곳이
     # 횡단보도 정지선이다. 그래서 정지선 정지를 마커10 의 동작으로 옮겼다.
-    {"id": 10, "pose": [-21, 46, LEFT ], "cm":  9, "hop":  5},   # 횡단보도 정지선     마커 왼쪽
+    {"id": 10, "pose": [-21, 46, LEFT ], "cm":  9, "hop": 13},   # 횡단보도 정지선     마커 왼쪽
 ]
 
 
@@ -876,18 +878,28 @@ def find_aruco(aruco_num, direction, try_count, deadline=None):
     return False, None
 
 def check_angle(aruco_num, target, allow_range=15):
+    """(맞았나, 돌아야 할 각도) 를 돌려준다. 못 보면 (False, None).
+
+    예전엔 방향(LEFT/RIGHT)만 주고 호출부가 MATCH_STEP_DEG 씩 찔끔찔끔 돌았다.
+    20도 어긋나 있으면 네 번을 돌아야 하고, 회전 한 번마다 coast 대기가 붙는다.
+    x(좌우 cm)와 z(거리 cm)를 둘 다 아는데 각도를 모를 리가 없다 — 바로 계산한다.
+    """
     success, pose = detect_target_aruco(aruco_num)
     if not success:
         print("check_angle, not detected")
         return False, None
 
-    cur_pose_x = pose[0][1]
-    print("current_pose_x", round(cur_pose_x, 1), "target_pose_x", target)
-    if cur_pose_x < target - allow_range:
-        return False, LEFT
-    if cur_pose_x > target + allow_range:
-        return False, RIGHT
-    return True, 0          # 경계값에서 아무 분기도 안 타고 None 이 반환되던 구멍을 막았다
+    cur_x, z = pose[0][1], pose[0][3]
+    off = cur_x - target
+    print(f"current_pose_x {cur_x:.1f} target_pose_x {target} (오차 {off:+.1f}cm)")
+    if abs(off) <= allow_range:
+        return True, 0.0
+
+    # 오른쪽으로 치우쳐 있으면(off>0) 오른쪽으로 돌아야 한다 -> 양수
+    deg = math.degrees(math.atan2(off, max(z, 1.0)))
+    deg = max(-MATCH_MAX_DEG, min(MATCH_MAX_DEG, deg))
+    print(f"  -> {deg:+.1f}도 회전")
+    return False, deg
 
 
 def check_distance(aruco_num, target, allow_range=5):
@@ -939,11 +951,11 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
             print(f"[timeout] 마커 {aruco_num} 각도 정렬 {timeout}초 초과, 포기")
             return False
 
-        aligned, angle_direction = check_angle(aruco_num, target_x)
+        aligned, angle_deg = check_angle(aruco_num, target_x)
         if aligned:
             break
 
-        if angle_direction is None:          # 마커를 놓쳤다
+        if angle_deg is None:                # 마커를 놓쳤다
             lost += 1
             print("angle: 마커 놓침", lost)
             if lost >= 5:
@@ -956,10 +968,9 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
             continue
 
         lost = 0
-        if angle_direction == LEFT:
-            turn_left_deg(MATCH_STEP_DEG)
-        else:
-            turn_right_deg(MATCH_STEP_DEG)
+        if abs(angle_deg) < MATCH_MIN_DEG:   # 너무 작으면 돌아봐야 coast 에 묻힌다
+            break
+        turn_deg(angle_deg)
         time.sleep(SLEEP_TIME_AFTER_MOVE)
     print("angle success")
 
