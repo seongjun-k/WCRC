@@ -26,6 +26,8 @@ PC 쪽 검증:  python tools/sim_drive.py   /   python tools/road.py
 """
 import math
 import os
+import re
+import shutil
 import sys
 import threading
 import time
@@ -59,6 +61,14 @@ DEFAULT = 999             # 시간 옵션이 필요 없는 동작에 사용
 
 
 MOTOR_SPEED = 90
+
+# 좌우 모터 편향 보정. 왼쪽에 더하고 오른쪽에서 빼는 값(속도 단위, 양수 = 왼쪽을 빠르게).
+# 무게가 좌우로 치우치면(센서 탈착·배터리 위치) 같은 속도를 줘도 직진이 휜다. 이건
+# 상수 외란이라 도로 추종의 P 제어로는 못 없앤다 — P 는 오차에 비례해서만 밀어내므로
+# 편향과 힘이 같아지는 지점, 즉 도로 한쪽에 붙은 채로 평형을 이룬다. 좌우 여유가
+# 2.1cm 뿐이라 그대로 선을 넘고, 교차로에서 돌 때 마커를 친다.
+# `python3 drive.py cal forward` 가 IMU 로 직진 중 yaw 가 도는 양을 재서 갱신한다.
+MOTOR_TRIM = 0
 SEARCH_MOTOR_SPEED = 65
 
 # 제자리 회전은 시간이 아니라 **각도**로 지정하고, IMU(BNO055)로 실제 각도를 보며 닫는다.
@@ -417,6 +427,13 @@ def display_apple_count(apple_count):
 # 거리 캘리브레이션이 되게 하려는 것 — 따로 측정 모드를 돌릴 시간이 없다.
 _cal = []
 _last_arrival_z = None
+_last_arrival_x = None   # 도착 시점에 마커가 옆으로 몇 cm 떨어져 있었나
+_last_seen_x = None
+
+# 제자리 회전 때 로봇 몸체가 쓸고 지나가는 반경(cm). 바퀴 폭 절반 5.55cm 에
+# 앞뒤로 튀어나온 부분을 더한 값이다. ★실측할 것: 종이 위에 놓고 360도 돌린 뒤
+# 자국의 반지름을 잰다. 규정 5번(지형지물 충돌) 패널티 5초가 여기에 걸린다.
+ROBOT_SWEEP_CM = 8.0
 
 _apple_jobs = []
 
@@ -473,12 +490,13 @@ def collect_apple_counts():
 # ================================================================ 모터
 
 def move_forward(duration_time, motor_speed=MOTOR_SPEED):
-    pinky_motor.move(motor_speed, motor_speed)
+    pinky_motor.move(motor_speed + MOTOR_TRIM, motor_speed - MOTOR_TRIM)
     time.sleep(duration_time)
     pinky_motor.move(0, 0)
 
 def move_backward(duration_time, motor_speed=MOTOR_SPEED):
-    pinky_motor.move(-motor_speed, -motor_speed)
+    # 후진은 같은 편향이 반대 방향으로 나타난다 -> 부호도 뒤집는다
+    pinky_motor.move(-motor_speed + MOTOR_TRIM, -motor_speed - MOTOR_TRIM)
     time.sleep(duration_time)
     pinky_motor.move(0, 0)
 
@@ -605,6 +623,13 @@ ROAD_MIN_STEER_TIME = 0.15 # 이보다 짧은 전진은 그냥 직진 (마지막
 # 0.4 였는데 0.15 로 내렸다. 0.4초는 50cm/s 에서 20cm 이고, 도로 폭이 15.4cm 인데
 # 좌우 여유가 2.1cm 뿐이라 20cm 를 눈 감고 가면 곡선에서 그대로 나간다.
 
+# 카메라 광축이 로봇 중심선과 어긋난 양(px, 오른쪽이 +). 0 이 아닌데 0 으로 두면
+# 로봇은 "화면 중앙 = 도로 중앙" 으로 착각해 그 차이만큼 계속 한쪽에 붙어 달린다.
+# 좌우 여유가 2.1cm 뿐이라 이 편향 하나로 바퀴가 선을 넘는다.
+# 도로 한가운데에 똑바로 세우고 `python3 drive.py road` -> 추천값을 여기 적는다.
+ROAD_CENTER_BIAS = 0
+
+
 
 def _otsu(ch, lo, hi):
     """이 프레임 안에서 밝은/어두운(또는 저채도/고채도) 경계를 스스로 찾는다.
@@ -699,7 +724,7 @@ def road_offset(frame):
         near = far
     if far is None:
         far = near
-    error = (w / 2 - near) / (w / 2)
+    error = (w / 2 + ROAD_CENTER_BIAS - near) / (w / 2)
     curve = (near - far) / (w / 2)
     return float(np.clip(error, -1, 1)), float(np.clip(curve, -1, 1))
 
@@ -712,6 +737,101 @@ def road_steer(frame):
     return float(np.clip(-(ROAD_KP * error + ROAD_KD * curve), -1, 1))
 
 
+
+# ================================================================ 외운 경로 주행
+
+# 대회 도면(26wcrc_final.pdf 3페이지)에서 딴 도로 중심선. (누적 cm, 상대 헤딩 도).
+#
+# 카메라 도로 추종은 이 코스에서 못 쓴다 — S자라 직진 구간이 없어서 근거리 도로가
+# 항상 화면 밖으로 잘리고, 그러면 "가장 넓은 구간의 중점" 이 도로 중심이 아니게 된다.
+# error 가 실제 치우침보다 작게 나와 로봇은 한쪽에 붙은 채 평형을 이룬다 (실측).
+# 그래서 도로 형상을 미리 외워 IMU 로 닫는다.
+#
+# 헤딩은 구간 시작을 0 으로 본 **상대값**이다. 교차로에서 마커 정렬 회전이 끼어도
+# 다음 호출이 그때의 헤딩을 새 기준으로 잡으므로 저절로 흡수된다.
+# 도면은 200dpi 렌더에서 1px = 1mm 로 떨어진다 (경기장 2100x1100mm).
+# 5cm 웨이포인트 선형보간의 실제 중심선 대비 최대 이탈 1.0cm (좌우 여유 2.1cm).
+# 등곡률 원호로 근사하면 마지막 구간에서 12.3cm 벗어나 도로를 나간다 — 그래서 안 쓴다.
+PATH_LEGS = [
+    # [0] START -> 교차로1 (마커1)  도면 48cm, 총 +13도
+    [(0, +0), (9, -3), (13, -6), (20, -3), (23, +1), (25, +4), (27, +7), (29, +10), (33, +13), (48, +13)],
+    # [1] 교차로1 -> 교차로2 (마커2)  도면 48cm, 총 +6도
+    [(0, +0), (14, +3), (18, +7), (22, +10), (34, +6), (48, +6)],
+    # [2] 교차로2 -> 교차로3 (마커4)  도면 47cm, 총 +24도
+    [(0, +0), (26, +3), (28, +6), (29, +9), (31, +12), (33, +16), (34, +19), (34, +22), (47, +24)],
+    # [3] 교차로3 -> 교차로4 (마커5)  도면 51cm, 총 -6도
+    [(0, +0), (20, +3), (27, +0), (32, -3), (38, -6), (51, -6)],
+    # [4] 교차로4 -> 정지선 -> END (마커10)  도면 67cm, 총 -76도
+    [(0, +0), (14, -3), (18, -7), (19, -10), (19, -13), (20, -16), (21, -19), (22, -22), (22, -26), (23, -29), (27, -32), (32, -29), (33, -25), (33, -22), (34, -19), (35, -16), (37, -13), (43, -17), (43, -20), (44, -24), (44, -27), (45, -30), (45, -34), (46, -37), (46, -40), (47, -43), (48, -47), (49, -50), (49, -53), (50, -56), (50, -60), (51, -63), (51, -66), (51, -70), (52, -73), (52, -76), (67, -76)],
+]
+
+PATH_MODE = False       # run2 가 켠다. run 은 건드리지 않는다
+PATH_STEP_CM = 3.0      # 한 번에 눈 감고 가는 거리. 짧을수록 정확하고 느리다
+PATH_KP = 0.5           # 한 스텝에 헤딩 오차의 몇 배를 없앨지. 1.0 이면 한 번에 다 (진동)
+PATH_MAX_BIAS = 35      # 좌우 속도차 상한. 넘으면 속도를 낮춘다 (아래 참고)
+PATH_MIN_SPEED = 35     # 급커브에서 낮출 수 있는 속도의 바닥
+
+_leg = None             # 지금 타고 있는 구간 프로파일
+_leg_cm = 0.0           # 그 구간에서 지금까지 간 거리
+
+
+def path_heading(cm):
+    """구간 시작에서 cm 만큼 갔을 때의 목표 헤딩(도). 프로파일 밖이면 끝값을 문다."""
+    if not _leg:
+        return 0.0
+    return float(np.interp(cm, [p[0] for p in _leg], [p[1] for p in _leg]))
+
+
+def follow_path(duration_time, motor_speed=MOTOR_SPEED):
+    """외운 헤딩 프로파일을 따라 전진한다. duration_time 은 기준 속도 기준 시간 = 곧 거리.
+
+    좌우 속도차는 두 몫을 더한 것이다.
+      · 피드포워드: 이 스텝에서 돌아야 할 각도를 그대로 만든다. 회전 실측식을 쓴다 —
+        좌우차 D 가 만드는 각속도가 TURN_DEG_PER_SEC x (D/2) / MOTOR_SPEED 이므로
+        원하는 각속도에서 D 를 역산할 수 있다. MOTOR_TRIM 과 같은 환산이다.
+      · 피드백: IMU 로 잰 '아직 못 돈 각도'. 미끄러짐과 상수 편향을 여기서 턴다.
+        IMU 를 못 읽으면 피드포워드만으로 간다 (열린 루프).
+    """
+    global _leg_cm
+    dist = duration_time * MOVE_FORWARD_PER_ONE
+    y0 = read_yaw()
+    h0 = path_heading(_leg_cm)
+    gone = 0.0
+    while gone < dist - 1e-6:
+        step = min(PATH_STEP_CM, dist - gone)
+        sec = step / MOVE_FORWARD_PER_ONE
+        turn = path_heading(_leg_cm + step) - path_heading(_leg_cm)
+        err = 0.0
+        if y0 is not None:
+            y = read_yaw()
+            if y is not None:
+                err = (path_heading(_leg_cm) - h0) - ((y - y0 + 180) % 360 - 180)
+        bias = MOTOR_SPEED * ((turn + PATH_KP * err) / sec) / TURN_DEG_PER_SEC
+        speed = motor_speed
+        if abs(bias) > PATH_MAX_BIAS:
+            # 급커브. 좌우차만 키우면 한쪽 바퀴가 상한에 잘려 오히려 덜 휜다.
+            # 곡률은 (좌우차 / 속도) 에 비례하므로 속도를 낮추면 같은 차이로 더 휜다.
+            # 시간은 그만큼 길어지고 가는 거리는 그대로다 (거리로 진행을 센다).
+            scale = max(PATH_MIN_SPEED / speed, PATH_MAX_BIAS / abs(bias))
+            speed = max(PATH_MIN_SPEED, int(speed * scale))
+            bias *= scale
+            sec = step / (MOVE_FORWARD_PER_ONE * speed / MOTOR_SPEED)
+        bias = int(np.clip(bias, -PATH_MAX_BIAS, PATH_MAX_BIAS))
+        pinky_motor.move(max(10, min(100, speed + bias + MOTOR_TRIM)),
+                         max(10, min(100, speed - bias - MOTOR_TRIM)))
+        time.sleep(sec)
+        gone += step
+        _leg_cm += step
+    pinky_motor.move(0, 0)      # 구간 끝에서만 선다
+
+
+def leg_begin(i):
+    """i 번째 구간의 외운 경로를 건다. run(PATH_MODE=False) 이면 아무것도 안 한다."""
+    global _leg, _leg_cm
+    if PATH_MODE and i < len(PATH_LEGS):
+        _leg, _leg_cm = PATH_LEGS[i], 0.0
+        print(f"  외운 경로 [{i}] 총 {_leg[-1][0]:.0f}cm / {_leg[-1][1]:+.0f}도")
+
 def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
     """step 은 0.25 였는데 0.12 로 내렸다.
 
@@ -719,8 +839,6 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
     한 스텝에 d 만큼 가면 도로가 d^2/(2*55cm) 만큼 옆으로 빠진다.
     0.25초(12.5cm) 면 1.4cm — 여유 2.1cm 를 거의 다 먹는다. 0.12초(6cm) 면 0.3cm.
     """
-    if not ROAD_FOLLOW:
-        return move_forward(duration_time, motor_speed)
     """도로 중심을 보며 전진한다.
 
     긴 전진을 짧게 쪼개고, 매 조각 직전에 도로를 보고 좌우 바퀴 속도를 다르게 준다.
@@ -730,8 +848,16 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
     거기서 또 꺾으면 정렬이 흐트러진다.
     """
     if duration_time < ROAD_MIN_STEER_TIME:
+        globals()["_leg_cm"] += duration_time * MOVE_FORWARD_PER_ONE
         move_forward(duration_time, motor_speed)
         return
+
+    if _leg is not None:
+        # run2. 카메라 대신 외운 경로를 탄다 (ROAD_FOLLOW 와 무관하다).
+        return follow_path(duration_time, motor_speed)
+
+    if not ROAD_FOLLOW:
+        return move_forward(duration_time, motor_speed)
 
     remaining = duration_time
     while remaining > 0:
@@ -909,11 +1035,13 @@ def check_distance(aruco_num, target, allow_range=5):
     를 한 번 더 불렀다. 접근 루프가 반복문이라 프레임을 매번 두 장씩 읽었고,
     그게 그대로 랩타임이었다.
     """
+    global _last_seen_x
     success, pose = detect_target_aruco(aruco_num)
     if not success:
         print("check_distance, not detected")
         return False, None, None
 
+    _last_seen_x = pose[0][1]
     cur_pose_z = pose[0][3]
     print("cur_pose_z", round(cur_pose_z, 1), "target_pose_z", target)
     if cur_pose_z > target + allow_range:
@@ -975,8 +1103,8 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
     print("angle success")
 
     # --- 거리(z) 맞추기 ---
-    global _last_arrival_z
-    _last_arrival_z = None
+    global _last_arrival_z, _last_arrival_x, _last_seen_x
+    _last_arrival_z = _last_arrival_x = _last_seen_x = None
     not_detected_count = 0
     last_z, last_step = None, None
     while True:
@@ -997,6 +1125,7 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
 
         if arrived:
             _last_arrival_z = last_z
+            _last_arrival_x = _last_seen_x
             print(f"도착 (마지막으로 본 거리 {last_z:.0f}cm)" if last_z else "도착")
             break
 
@@ -1125,6 +1254,7 @@ def run_course():
     start_time = time.time()
     for i in range(len(target_list)):
         current_id = target_list[i]["id"]
+        leg_begin(i)
         print(f"\n===== [{i}] 마커 {current_id} 로 이동 "
               f"(경과 {time.time() - start_time:.0f}s) =====")
 
@@ -1137,7 +1267,8 @@ def run_course():
             move_forward_on_road(blind / MOVE_FORWARD_PER_ONE)
 
         result = track_target_aruco_marker(current_id, target_list[i]["pose"], SEARCH_COUNT)
-        _cal.append((current_id, cm, target_list[i]["pose"][1], _last_arrival_z, result))
+        _cal.append((current_id, cm, target_list[i]["pose"][1], _last_arrival_z,
+                     _last_arrival_x, result))
         if not result:
             # 평가는 "어디까지 갔나" 로 그룹이 갈린다 (메인도로 E < 교차로1 D < 과수원 C
             # < 도착 B < 하차장 A). 마커 하나 놓쳤다고 전체를 포기하면 그룹이 내려간다.
@@ -1153,6 +1284,11 @@ def run_course():
         # 성공/실패와 무관하게 실행한다.
         # 마커로 위치를 확정했으면, 교차로까지 남은 거리는 눈 감고 간다.
         # (실패했을 때는 위에서 이미 남은 거리를 갔으므로 두 번 가지 않는다)
+        if result and cm:
+            # 마커를 잡았다 = 지금이 외운 cm 지점이다. 정렬·접근하며 흘린 거리를 여기서
+            # 맞춰야 남은 구간의 곡률 타이밍이 안 밀린다.
+            globals()["_leg_cm"] = float(cm)
+
         hop = target_list[i].get("hop") or 0
         if result and hop:
             print(f"  마커 확정 -> 교차로까지 외운 {hop}cm 를 마저 간다")
@@ -1163,10 +1299,10 @@ def run_course():
 
     pinky_motor.move(0, 0)
     print("\n===== 거리 캘리브레이션 =====")
-    print(" 마커   cm   목표z   실제z=권장hop   판정")
-    for mid, cm, tz, az, ok in _cal:
+    print(" 마커   cm   목표z   실제z=권장hop   옆거리   판정")
+    for mid, cm, tz, az, ax, ok in _cal:
         if az is None:
-            print(f" {mid:>4}  {cm:>4}   {tz:>4}    ----   마커 실패 — cm 이 너무 길거나 짧다")
+            print(f" {mid:>4}  {cm:>4}   {tz:>4}    ----     ----   마커 실패 — cm 이 너무 길거나 짧다")
             continue
         # 마커가 교차로 옆에 붙어 있으므로 "마커까지 남은 깊이" 가 곧 교차로까지의 거리다.
         # (마커1 에서 z=21.2 / hop 23 으로 완주 성공한 것이 이 규칙의 근거)
@@ -1177,7 +1313,18 @@ def run_course():
             note = "정지선 기준 — hop 규칙 해당 없음"
         else:
             note = "OK" if abs(az - hop_now) <= 4 else f"hop {hop_now} -> {az:.0f} 로 바꿀 것"
-        print(f" {mid:>4}  {cm:>4}   {tz:>4}   {az:5.1f}   {note}")
+        # 회전은 마커와 나란한 자리에서 한다. 옆거리가 회전 반경보다 좁으면 몸체가
+        # 마커를 친다 = 규정 5번 5초. 도로 중앙을 못 지키면 여기서 여유가 먼저 사라진다.
+        if ax is None:
+            side = " ----"
+        else:
+            gap = abs(ax) - ROBOT_SWEEP_CM
+            side = f"{abs(ax):5.1f}"
+            if gap < 0:
+                note = f"!! 마커를 친다 (여유 {gap:+.1f}cm) — " + note
+            elif gap < 2:
+                note = f"!  아슬아슬 (여유 {gap:+.1f}cm) — " + note
+        print(f" {mid:>4}  {cm:>4}   {tz:>4}   {az:5.1f}   {side}   {note}")
     total_apple_count += collect_apple_counts()   # 아직 안 거둔 게 있으면 여기서
     print(f"\n===== 주행 종료. 사과 {total_apple_count}개 / "
           f"{time.time() - start_time:.0f}초 =====")
@@ -1231,6 +1378,21 @@ def cmd_run(*args):
         pinky_motor.move(0, 0)
     finally:
         teardown()
+
+
+def cmd_run2(*args):
+    """run 과 같은 코스를, 카메라 도로 추종 대신 **외운 경로**로 달린다.
+
+        python3 drive.py run2
+
+    도로 형상은 대회 도면에서 딴 PATH_LEGS 이고, 헤딩은 IMU 로 닫는다.
+    마커 탐색·정렬·교차로 동작은 run 과 완전히 같은 코드를 쓴다 — 다른 건 조향뿐이다.
+    run 은 그대로 두었으니, 이쪽이 어긋나면 run 으로 돌아가면 된다.
+    """
+    global PATH_MODE
+    PATH_MODE = True
+    print("외운 경로 모드 (카메라 도로 추종 끔)")
+    return cmd_run(*args)
 
 
 def cmd_check():
@@ -1342,6 +1504,210 @@ def cmd_turn_cal():
     return 0
 
 
+# ================================================================ 캘리브레이션
+
+
+def _write_const(name, value, path):
+    """`NAME = 숫자` 한 줄의 값만 바꾼다. 못 찾으면 예외 — 조용히 넘어가면
+    캘리브레이션을 돌리고도 옛날 값으로 달리게 된다."""
+    src = open(path, encoding="utf-8").read()
+    pat = re.compile(rf"^({name} = )-?[\d.]+", re.M)
+    if not pat.search(src):
+        raise KeyError(f"{name} 을 {path} 에서 못 찾았다")
+    open(path, "w", encoding="utf-8").write(pat.sub(rf"\g<1>{value}", src, count=1))
+    return next(l for l in open(path, encoding="utf-8") if l.startswith(name + " ")).rstrip()
+
+
+def _spin_measure(speed, deg):
+    """speed 로 deg 도 돌려 (각속도 도/초, coast 도) 를 잰다. 양수 = 우회전.
+
+    turn_deg 를 쓰지 않는다 — 그건 지금 재려는 상수로 미리 멈추기 때문에
+    그걸로 재면 옛 값이 그대로 나오는 순환이 된다. 여기선 목표각까지 돌린 뒤
+    끄고, 꺼진 다음 더 돈 각도를 coast 로 본다.
+    """
+    y = read_yaw()
+    if y is None:
+        return None, None
+    sign = 1 if deg > 0 else -1
+    prev, turned = y, 0.0
+    pinky_motor.move(speed * sign, -speed * sign)
+    t0 = time.time()
+    while abs(turned) < abs(deg) and time.time() - t0 < TURN_MAX_SEC:
+        y = read_yaw()
+        if y is not None:
+            turned += (y - prev + 180) % 360 - 180
+            prev = y
+    pinky_motor.move(0, 0)
+    dt = time.time() - t0
+    time.sleep(0.9)                       # coast 가 완전히 멎을 때까지
+    y = read_yaw()
+    coast = abs((y - prev + 180) % 360 - 180) if y is not None else 0.0
+    return abs(turned) / dt, coast
+
+
+def _marker_z(tries=9, need=3):
+    """지금 보이는 아루코까지의 z(cm) 의 **중앙값**. 못 보면 None.
+
+    한 프레임만 쓰면 못 쓴다. 45cm 에서 36mm 마커의 z 는 프레임마다 몇 cm 씩 튀고,
+    10cm 이동을 z 차이로 재면 그 노이즈가 그대로 60% 오차가 된다 (실측).
+    중앙값이라 한두 장이 크게 튀어도 견딘다.
+    """
+    zs = []
+    for _ in range(tries):
+        _, p = pinky_cam.detect_aruco(pinky_cam.get_frame(), marker_size=MARKER_SIZE_M)
+        if p:
+            zs.append(p[0][3])
+    return float(np.median(zs)) if len(zs) >= need else None
+
+
+CAL_TURN_SPEEDS = (15, 25, 40, 60, MOTOR_SPEED)
+CAL_TURN_DEG = 60          # 한 번에 도는 각도. 좌우 한 쌍이라 제자리로 돌아온다
+# 길게 갈수록 z 노이즈에 덜 휘둘린다. 다만 너무 가면 마커 인식 범위(37~75cm)를
+# 벗어난다 — 60cm 에서 시작하면 1.2초(약 20cm)가 딱 맞는다.
+CAL_FORWARD_SEC = 1.2
+CAL_FORWARD_N = 5
+
+
+def cmd_cal(*args):
+    """주행 상수를 한 번에 다시 잰다. 무게가 바뀌면(센서 탈착·배터리 교체) 이것만 돌린다.
+
+        python3 drive.py cal                 # 전부 재고, 확인 후 파일에 기록
+        python3 drive.py cal turn            # 회전만
+        python3 drive.py cal forward road    # 골라서
+        python3 drive.py cal --yes           # 묻지 않고 바로 기록
+
+    준비 (한 자리에서 셋 다 된다):
+      · 로봇을 도로 한가운데, 진행 방향으로 똑바로   -> ROAD_CENTER_BIAS
+      · 정면 45~65cm 에 아루코 마커 하나            -> MOVE_FORWARD_PER_ONE
+      · 좌우로 한 바퀴 돌 공간                      -> TURN_DEG_PER_SEC, TURN_COAST_PER_SPEED
+    끝나면 로봇은 처음 자리·처음 방향으로 돌아와 있다.
+    """
+    args = list(args)
+    auto = "--yes" in args
+    if auto:
+        args.remove("--yes")
+    only = set(args) or {"road", "turn", "forward"}
+    unknown = only - {"road", "turn", "forward"}
+    assert not unknown, f"모르는 항목: {unknown}"
+
+    new = {}
+    setup()
+    try:
+        if "road" in only:
+            frame = pinky_cam.get_frame()
+            e, _ = road_offset(frame)
+            if e is None:
+                print("[도로] 도로가 안 보인다 -> 건너뜀")
+            else:
+                new["ROAD_CENTER_BIAS"] = round(ROAD_CENTER_BIAS - e * frame.shape[1] / 2)
+                print(f"[도로] error={e:+.3f} -> ROAD_CENTER_BIAS = {new['ROAD_CENTER_BIAS']}")
+
+        if only & {"turn", "forward"}:
+            warmup_motors()      # 냉간은 26% 느리다. 예열 전 값을 적으면 코스가 통째로 밀린다
+
+        if "turn" in only:
+            if read_yaw() is None:
+                print("[회전] IMU 를 못 읽는다 -> 건너뜀")
+            else:
+                rates, coasts = [], []
+                for speed in CAL_TURN_SPEEDS:
+                    for sign in (1, -1):
+                        rate, coast = _spin_measure(speed, sign * CAL_TURN_DEG)
+                        if rate is None:
+                            continue
+                        rates.append(rate / speed)
+                        coasts.append((speed, coast))
+                        print(f"  속도 {speed:>2} {'우' if sign > 0 else '좌'}: "
+                              f"{rate:5.0f}도/초   coast {coast:4.1f}도")
+                if coasts:
+                    new["TURN_DEG_PER_SEC"] = round(float(np.median(rates)) * MOTOR_SPEED)
+                    # coast = k x 속도 (원점을 지나는 직선) 의 최소제곱해
+                    v = np.array([s for s, _ in coasts], float)
+                    c = np.array([x for _, x in coasts], float)
+                    new["TURN_COAST_PER_SPEED"] = round(float((v * c).sum() / (v * v).sum()), 3)
+                    print(f"[회전] TURN_DEG_PER_SEC = {new['TURN_DEG_PER_SEC']}   "
+                          f"TURN_COAST_PER_SPEED = {new['TURN_COAST_PER_SPEED']}")
+
+        if "forward" in only:
+            speeds, drifts = [], []
+            for i in range(CAL_FORWARD_N):
+                # 뒤로 먼저 뺀다. 마커 인식은 37~75cm 에서만 되므로, 앞으로만 가면
+                # 잴 수 있는 거리가 얼마 안 된다. 뒤로 뺐다가 그 거리를 재면
+                # 마커를 옮기지 않고도 길게 잴 수 있다 (긴 거리 = 작은 상대 오차).
+                move_backward(CAL_FORWARD_SEC)
+                time.sleep(0.4)                       # 흔들림이 멎어야 z 가 튀지 않는다
+                z0, y0 = _marker_z(), read_yaw()
+                move_forward(CAL_FORWARD_SEC)
+                time.sleep(0.4)
+                z1, y1 = _marker_z(), read_yaw()
+                if y0 is not None and y1 is not None:
+                    # 똑바로 갔다면 yaw 가 그대로여야 한다. 돈 만큼이 좌우 편향이다.
+                    drifts.append(((y1 - y0 + 180) % 360 - 180) / CAL_FORWARD_SEC)
+                if z0 is None or z1 is None:
+                    print(f"  {i + 1}회차: 마커를 놓쳤다 — 속도는 버린다"
+                          f"{'' if not drifts else f'  (휨 {drifts[-1]:+.1f}도/초)'}")
+                    continue
+                speeds.append(abs(z1 - z0) / CAL_FORWARD_SEC)
+                print(f"  {i + 1}회차: z {z0:5.1f} -> {z1:5.1f}cm   {speeds[-1]:5.2f} cm/초"
+                      f"{'' if not drifts else f'   휨 {drifts[-1]:+.1f}도/초'}")
+            if speeds:
+                med = float(np.median(speeds))
+                spread = (max(speeds) - min(speeds)) / med
+                if spread > 0.25 or len(speeds) < 3:
+                    # 실제 이동 속도가 회차마다 25% 씩 다를 리 없다. z 가 튄 것이므로
+                    # 이 값을 적으면 외운 거리가 통째로 틀어진다. 차라리 안 적는다.
+                    print(f"[전진] 편차 {spread*100:.0f}% ({len(speeds)}회) — 못 믿는다, 적지 않는다."
+                          f"  마커를 60cm 앞에 두고 다시")
+                else:
+                    new["MOVE_FORWARD_PER_ONE"] = round(med, 2)
+                    print(f"[전진] MOVE_FORWARD_PER_ONE = {new['MOVE_FORWARD_PER_ONE']}"
+                          f"  (편차 {spread*100:.0f}%)")
+            else:
+                print("[전진] 전부 실패 -> 마커를 45~65cm 정면에 두고 다시")
+            if drifts:
+                # 좌우 차 D 가 만드는 각속도는 TURN_DEG_PER_SEC x (D/2) / MOTOR_SPEED.
+                # trim 은 한쪽에 더하고 반대쪽에서 빼므로 D = 2 x trim 이다.
+                drift = float(np.median(drifts))
+                new["MOTOR_TRIM"] = round(MOTOR_TRIM - drift * MOTOR_SPEED / TURN_DEG_PER_SEC)
+                print(f"[직진] 휨 {drift:+.1f}도/초 -> MOTOR_TRIM = {new['MOTOR_TRIM']}")
+                if abs(new["MOTOR_TRIM"] - MOTOR_TRIM) > 1:
+                    print("       한 번에 다 안 잡힌다 (직진과 회전은 미끄러짐이 다르다)."
+                          " 기록하고 cal forward 를 한 번 더 돌릴 것")
+            else:
+                print("[직진] IMU 를 못 읽는다 -> MOTOR_TRIM 은 못 잰다")
+    finally:
+        teardown()
+
+    if not new:
+        print("\n잰 값이 없다 — 기록하지 않는다")
+        return 1
+    # 여기서 재는 건 '제자리 실험' 값이고, 지금 파일에 있는 건 코스를 실제로 돌려
+    # 맞춘 값일 수 있다. 실주행 튜닝을 실험값으로 덮으면 주행이 나빠진다 — 실제로
+    # 그렇게 해서 한 번 망쳤다. 크게 다르면 눈에 띄게 세우고, --yes 여도 묻는다.
+    big = {k: v for k, v in new.items()
+           if globals()[k] and abs(v - globals()[k]) / abs(globals()[k]) > 0.05}
+    print("\n적용할 값:")
+    for k, v in new.items():
+        cur = globals()[k]
+        mark = "  <<< 5% 넘게 바뀐다. 지금 값이 실주행으로 맞춘 것이면 두는 게 낫다" if k in big else ""
+        print(f"  {k}: {cur} -> {v}{mark}")
+    if big and auto:
+        print("\n실주행 튜닝을 덮을 수 있어 --yes 를 무시한다. 확인이 필요하다.")
+        auto = False
+    if not auto and input("엔터 -> 기록 / 그 외 입력 -> 취소: ").strip():
+        print("취소")
+        return 0
+
+    path = os.path.abspath(__file__)
+    shutil.copy(path, path + ".bak")
+    print(f"\n백업 {path}.bak")
+    for k, v in new.items():
+        print("  " + _write_const(k, v, path))
+    print("주석은 손대지 않는다 — 위 줄을 보고 옛 설명이 남아 있으면 직접 고칠 것")
+    print("바뀐 값은 다음 실행부터 적용된다 (지금 프로세스는 옛 값)")
+    return 0
+
+
 def cmd_road(path=None):
     """도로 마스크 확인. 사진 경로를 주면 그 사진으로, 없으면 지금 카메라로."""
     if path:
@@ -1360,6 +1726,10 @@ def cmd_road(path=None):
     print(f"추천  ROAD_S_MAX = {np.percentile(low[:, 1], 60) + 15:.0f}  "
           f"ROAD_V_MIN = {max(0, np.percentile(low[:, 2], 30) - 15):.0f}")
     print(f"현재  ROAD_S_MAX = {ROAD_S_MAX}  ROAD_V_MIN = {ROAD_V_MIN}")
+    if e is not None:
+        # 지금 도로 한가운데에 똑바로 서 있다면, 남은 error 는 전부 카메라 편향이다.
+        print(f"추천  ROAD_CENTER_BIAS = {ROAD_CENTER_BIAS - e * frame.shape[1] / 2:.0f}"
+              f"   (현재 {ROAD_CENTER_BIAS})  ※ 도로 한가운데 똑바로 세운 상태에서만")
 
     vis = frame.copy()
     vis[road_mask(frame) > 0] = (0, 0, 255)
@@ -1444,10 +1814,10 @@ def cmd_actions(index):
     return 0
 
 
-CMDS = {"run": cmd_run, "check": cmd_check, "pose": cmd_pose,
+CMDS = {"run": cmd_run, "run2": cmd_run2, "check": cmd_check, "pose": cmd_pose,
         "motors": cmd_motors, "track": cmd_track, "actions": cmd_actions,
         "forward-cal": cmd_forward_cal, "turn-cal": cmd_turn_cal,
-        "road": cmd_road}
+        "road": cmd_road, "cal": cmd_cal}
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
