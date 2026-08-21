@@ -16,7 +16,7 @@
     python3 drive.py pose           # 지금 보이는 마커의 x, z 출력 -> target_list 채우기
     python3 drive.py forward-cal    # MOVE_FORWARD_PER_ONE 측정
     python3 drive.py turn-cal       # IMU 회전 확인 (90도x4 로 제자리 검증)
-    python3 drive.py road [사진]    # 도로 마스크가 지금 화면에서 되는지 확인
+    python3 drive.py cam            # 카메라 실시간 (노트북 브라우저 http://192.168.4.1:8080)
 
 주피터를 안 쓰는 이유: 브라우저를 닫아도 커널이 남아 카메라·모터를 물고 있어서
 "카메라를 찾을 수 없습니다" 가 뜬다. 스크립트는 끝나면서 하드웨어를 반납한다.
@@ -104,8 +104,6 @@ MATCH_FORWARD_TIME = 0.4
 
 SLEEP_TIME_AFTER_MOVE = 0.08
 MOTOR_BIG_STEP_FORWARD = 1
-
-STRAIGHT_TO_MAIN_ROAD_TIME = 3  # 모터 스피드에 따라 변경 필요할 수 있음
 
 # 아루코 마커 하나에 매달릴 최대 시간(초).
 # 규정 패널티 1번 "모든 단계에서 60초 이상 진행 없을 시 기회 종료".
@@ -260,7 +258,8 @@ target_list = [
     # id  pose=[x, z, 탐색방향]        cm=직전 정지점부터   hop=마커 확정 후 눈감고
     {"id": 1,  "pose": [-17, 40, LEFT ], "cm": 26, "hop": 21},   # 교차로1 (과수원A)   마커 왼쪽
     {"id": 2,  "pose": [+17, 40, RIGHT], "cm":  7, "hop": 36},   # 교차로2 (과수원B)   마커 오른쪽
-    {"id": 4,  "pose": [ -4, 40, LEFT ], "cm": 26, "hop": 14},   # 교차로3 (과수원C)   마커 왼쪽
+    {"id": 4,  "pose": [-12, 40, LEFT ], "cm": 26, "hop": 14},   # 교차로3 (과수원C)   마커 왼쪽
+    # ↑ -4 였다. 회전 반경 8cm 보다 좁아 무조건 몸체가 마커를 친다(실제로 넘어뜨렸다).
     {"id": 5,  "pose": [+17, 40, RIGHT], "cm": 19, "hop": 17},   # 교차로4 (하차장)    마커 오른쪽
     # 마커2 의 cm 가 0 인 이유: 교차로1 에서 교차로2 까지가 43cm 인데 마커2 를
     # 44cm 앞에서 잡아야 해서, 교차로1 에 선 순간 이미 마커2 가 보인다.
@@ -587,157 +586,6 @@ def turn_right_deg(deg):
     return turn_deg(abs(deg))
 
 
-def go_straight_to_main_road(duration_time=STRAIGHT_TO_MAIN_ROAD_TIME):
-    motor_speed = MOTOR_SPEED
-    move_forward(duration_time)
-    time.sleep(duration_time)
-    pinky_motor.move(0, 0)
-
-# ================================================================ 도로 유지
-
-
-# ▼ 대회장 조명에서 재조정할 값 2개 (tools/road.py --tune 이 추천해준다)
-# 차선(도로 마스크) 추종을 쓸지. False 면 그냥 직진한다.
-# 코스가 고정이고 구간이 직선이며 교차로마다 마커로 위치를 리셋하므로, 카메라를
-# 0.25초마다 보는 비용을 안 내고 그냥 달리는 편이 빠르다. 대신 도로 이탈(5초/회)을
-# 막아줄 게 없으니, 굽은 구간이 있으면 True 로 되돌린다.
-ROAD_FOLLOW = True
-
-# 마커까지 외워둔 거리 중 몇 %를 카메라 없이 먼저 달릴지. 나머지는 마커로 폐루프.
-# 1.0 에 가까울수록 빠르지만 마커를 지나칠 위험이 커진다.
-APPROACH_BLIND_RATIO = 0.85
-
-ROAD_AUTO = True    # 프레임마다 Otsu 로 임계값을 잡는다. 이상하면 False
-ROAD_S_MAX = 70          # 이보다 채도가 높으면 도로가 아니다 (잔디·테두리·집기)
-ROAD_V_MIN = 150         # 이보다 어두우면 도로가 아니다 (그림자)
-
-ROAD_NEAR_BAND = (0.80, 1.00)   # 바로 앞  — 좌우 치우침 계산용
-ROAD_FAR_BAND = (0.60, 0.78)    # 조금 먼 앞 — 도로가 휘는 방향 계산용
-ROAD_MIN_RUN = 40               # 도로로 인정할 최소 가로 폭(px)
-ROAD_MIN_FILL = 0.30            # 한 열이 도로로 인정되려면 밴드의 몇 배가 차야 하는지
-
-ROAD_KP = 0.6            # 좌우 치우침 반영 정도
-ROAD_KD = 0.35           # 곡률(앞 도로가 휘는 정도) 반영 정도
-ROAD_GAIN = 0.5          # 조향을 바퀴 속도차로 얼마나 낼지 (0=직진만)
-ROAD_MIN_STEER_TIME = 0.15 # 이보다 짧은 전진은 그냥 직진 (마지막 미세 접근)
-# 0.4 였는데 0.15 로 내렸다. 0.4초는 50cm/s 에서 20cm 이고, 도로 폭이 15.4cm 인데
-# 좌우 여유가 2.1cm 뿐이라 20cm 를 눈 감고 가면 곡선에서 그대로 나간다.
-
-# 카메라 광축이 로봇 중심선과 어긋난 양(px, 오른쪽이 +). 0 이 아닌데 0 으로 두면
-# 로봇은 "화면 중앙 = 도로 중앙" 으로 착각해 그 차이만큼 계속 한쪽에 붙어 달린다.
-# 좌우 여유가 2.1cm 뿐이라 이 편향 하나로 바퀴가 선을 넘는다.
-# 도로 한가운데에 똑바로 세우고 `python3 drive.py road` -> 추천값을 여기 적는다.
-ROAD_CENTER_BIAS = 0
-
-
-
-def _otsu(ch, lo, hi):
-    """이 프레임 안에서 밝은/어두운(또는 저채도/고채도) 경계를 스스로 찾는다.
-
-    조명이 바뀌면 고정 임계값이 통째로 깨지는데, 대회 당일 조명은 미리 알 수 없고
-    현장에서 튜닝할 시간도 보장되지 않는다. Otsu 는 히스토그램 골짜기를 찾으므로
-    조명이 밝아지면 임계값도 같이 올라간다. 다만 화면에 도로만(또는 잔디만) 있으면
-    엉뚱한 데를 자르므로, 실측값 주변으로 clamp 해서 폭주를 막는다.
-    """
-    t, _ = cv2.threshold(ch, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return int(max(lo, min(hi, t)))
-
-
-def road_mask(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    if ROAD_AUTO:
-        s_max = _otsu(hsv[:, :, 1], 30, 120)     # 도로는 채도가 낮은 쪽
-        v_min = _otsu(hsv[:, :, 2], 100, 220)    # 도로는 명도가 높은 쪽
-    else:
-        s_max, v_min = ROAD_S_MAX, ROAD_V_MIN
-    mask = cv2.inRange(hsv, np.array([0, 0, v_min]),
-                            np.array([179, s_max, 255]))
-    k = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)      # 흰 점 노이즈 제거
-    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)     # 도로 위 글자 구멍 메우기
-
-
-def road_band_center(mask, band):
-    """밴드에서 도로 중심 x. 못 찾으면 None.
-
-    가장 넓은 '연속' 구간만 쓴다. 화면에 흰 물체가 여럿일 때 전체 평균을 내면
-    엉뚱한 가운데가 나오지만, 연속 구간을 쓰면 실제 도로 면을 고른다.
-    """
-    h, w = mask.shape
-    y0, y1 = int(h * band[0]), int(h * band[1])
-    sub = mask[y0:y1]
-    if sub.size == 0:
-        return None
-
-    on = (sub.sum(axis=0) / 255) >= (y1 - y0) * ROAD_MIN_FILL
-    if not on.any():
-        return None
-
-    best_len = best_start = 0
-    cur = None
-    for x, v in enumerate(np.append(on, False)):
-        if v and cur is None:
-            cur = x
-        elif not v and cur is not None:
-            if x - cur > best_len:
-                best_len, best_start = x - cur, cur
-            cur = None
-
-    if best_len < ROAD_MIN_RUN:
-        return None
-    return best_start + best_len / 2
-
-
-def road_band_width(mask, band):
-    """밴드에서 가장 넓은 연속 도로 구간의 폭(px). 교차로 감지에 쓴다.
-
-    교차로에서는 옆으로 갈라진 길이 같은 밴드에 붙어 나타나므로 이 폭이 급격히
-    넓어진다. 그 정점이 "지금 교차로 한가운데" 다.
-    """
-    h, w = mask.shape
-    y0, y1 = int(h * band[0]), int(h * band[1])
-    sub = mask[y0:y1]
-    if sub.size == 0:
-        return 0
-    on = (sub.sum(axis=0) / 255) >= (y1 - y0) * ROAD_MIN_FILL
-    best = cur = 0
-    for v in np.append(on, False):
-        cur = cur + 1 if v else 0
-        best = max(best, cur)
-    return best
-
-
-def road_offset(frame):
-    """(error, curve). 도로를 못 찾으면 (None, None).
-
-    error : -1~+1. 도로 중심이 화면 중심보다 왼쪽이면 양수
-            = 로봇이 오른쪽으로 치우친 것 -> 왼쪽으로 꺾어야 한다.
-    curve : -1~+1. 앞 도로가 휘는 방향.
-    """
-    mask = road_mask(frame)
-    w = mask.shape[1]
-    near = road_band_center(mask, ROAD_NEAR_BAND)
-    far = road_band_center(mask, ROAD_FAR_BAND)
-    if near is None and far is None:
-        return None, None
-    if near is None:
-        near = far
-    if far is None:
-        far = near
-    error = (w / 2 + ROAD_CENTER_BIAS - near) / (w / 2)
-    curve = (near - far) / (w / 2)
-    return float(np.clip(error, -1, 1)), float(np.clip(curve, -1, 1))
-
-
-def road_steer(frame):
-    """조향량 -1(좌) ~ +1(우). 도로를 못 찾으면 None -> 직진 유지."""
-    error, curve = road_offset(frame)
-    if error is None:
-        return None
-    return float(np.clip(-(ROAD_KP * error + ROAD_KD * curve), -1, 1))
-
-
-
 # ================================================================ 외운 경로 주행
 
 # 대회 도면(26wcrc_final.pdf 3페이지)에서 딴 도로 중심선. (누적 cm, 상대 헤딩 도).
@@ -752,24 +600,40 @@ def road_steer(frame):
 # 도면은 200dpi 렌더에서 1px = 1mm 로 떨어진다 (경기장 2100x1100mm).
 # 5cm 웨이포인트 선형보간의 실제 중심선 대비 최대 이탈 1.0cm (좌우 여유 2.1cm).
 # 등곡률 원호로 근사하면 마지막 구간에서 12.3cm 벗어나 도로를 나간다 — 그래서 안 쓴다.
+
+
+# 마커로 방향을 틀지 않는다. 마커 x 하나로 방향과 좌우 위치를 동시에 맞출
+# 수는 없어서, 지금 코드는 제자리 회전으로 x 를 맞춘다 — x 는 맞지만 로봇은 옆으로
+# 간 적이 없고, 그 회전이 외운 경로를 그대로 망가뜨린다 (실주행 28.8도).
+# 방향은 도면 헤딩 프로파일 + IMU 가 더 정확하다. 마커한테는 거리(z)만 받는다.
+PATH_NO_MARKER_TURN = True
+PATH_MIN_STEER_TIME = 0.15   # 이보다 짧은 전진은 조향하지 않는다 (마지막 미세 접근)
+
+# 마커까지 외워둔 거리 중 몇 %를 마커 확인 없이 먼저 달릴지.
+# (마커를 확인용으로만 쓰는 지금은 PATH_MARKER_CONFIRM_ONLY 쪽이 전량을 달린다)
+APPROACH_BLIND_RATIO = 0.85
+# 한 발 더: 마커한테 거리도 안 받는다. 마커는 "여기가 그 교차로다" 확인과 회전 명령
+# 트리거로만 쓴다. 탐색 회전·정렬 회전·접근 전진이 통째로 사라지므로 외운 경로가
+# 아무한테도 안 밀린다. 대신 절대 위치 리셋이 없어져 오차가 코스 끝까지 쌓인다.
+PATH_MARKER_CONFIRM_ONLY = True
 PATH_LEGS = [
-    # [0] START -> 교차로1 (마커1)  도면 48cm, 총 +13도
-    [(0, +0), (9, -3), (13, -6), (20, -3), (23, +1), (25, +4), (27, +7), (29, +10), (33, +13), (48, +13)],
-    # [1] 교차로1 -> 교차로2 (마커2)  도면 48cm, 총 +6도
-    [(0, +0), (14, +3), (18, +7), (22, +10), (34, +6), (48, +6)],
-    # [2] 교차로2 -> 교차로3 (마커4)  도면 47cm, 총 +24도
-    [(0, +0), (26, +3), (28, +6), (29, +9), (31, +12), (33, +16), (34, +19), (34, +22), (47, +24)],
-    # [3] 교차로3 -> 교차로4 (마커5)  도면 51cm, 총 -6도
-    [(0, +0), (20, +3), (27, +0), (32, -3), (38, -6), (51, -6)],
-    # [4] 교차로4 -> 정지선 -> END (마커10)  도면 67cm, 총 -76도
-    [(0, +0), (14, -3), (18, -7), (19, -10), (19, -13), (20, -16), (21, -19), (22, -22), (22, -26), (23, -29), (27, -32), (32, -29), (33, -25), (33, -22), (34, -19), (35, -16), (37, -13), (43, -17), (43, -20), (44, -24), (44, -27), (45, -30), (45, -34), (46, -37), (46, -40), (47, -43), (48, -47), (49, -50), (49, -53), (50, -56), (50, -60), (51, -63), (51, -66), (51, -70), (52, -73), (52, -76), (67, -76)],
+    # [0] START -> 교차로1   도면 44cm, 총 +74도
+    [(0, +0), (1, +0), (2, +0), (3, +0.1), (4, +0.4), (5, +1.1), (6, +1.8), (7, +2.5), (8, +3.2), (9, +3.7), (10, +4.7), (11, +6.5), (12, +7.9), (13, +8.9), (14, +9.9), (15, +10.4), (16, +10.7), (17, +11.9), (18, +13), (19, +13.9), (20, +15.4), (21, +16.4), (22, +15), (23, +16), (24, +17.2), (25, +17.3), (26, +21.4), (27, +24.7), (28, +27.3), (29, +30), (30, +31), (31, +31.2), (32, +31.5), (33, +32.1), (34, +32.2), (35, +32.6), (36, +32.9), (37, +33), (38, +33.3), (39, +33.5), (40, +36), (41, +47), (42, +59), (43, +71), (44, +73.8)],
+    # [1] 교차로1 -> 교차로2   도면 45cm, 총 +55도
+    [(0, +0), (1, +0), (2, +0), (3, +12), (4, +24), (5, +36), (6, +48), (7, +54.1), (8, +56.4), (9, +57.9), (10, +58.7), (11, +58.6), (12, +58.7), (13, +59.3), (14, +59.6), (15, +59.8), (16, +60.2), (17, +61.1), (18, +62.6), (19, +64.4), (20, +65.5), (21, +66.8), (22, +67.6), (23, +68.3), (24, +69.2), (25, +69.8), (26, +70), (27, +70.5), (28, +71.5), (29, +70.6), (30, +69), (31, +67.1), (32, +64.4), (33, +63), (34, +63.2), (35, +63.2), (36, +63.8), (37, +64), (38, +64.5), (39, +64.9), (40, +64.8), (41, +64.8), (42, +60.6), (43, +54.8), (44, +54.8), (44.7, +54.8)],
+    # [2] 교차로2 -> 교차로3   도면 43cm, 총 +33도
+    [(0, +0), (1, +0), (2, +0), (3, -6.2), (4, -9.6), (5, -14.5), (6, -22.2), (7, -29.1), (8, -36.1), (9, -39.7), (10, -39.8), (11, -38.8), (12, -38.1), (13, -37.4), (14, -36.7), (15, -36.4), (16, -36.1), (17, -35.7), (18, -35.5), (19, -36), (20, -36.4), (21, -36.5), (22, -36.7), (23, -37.3), (24, -37.3), (25, -37.4), (26, -38.2), (27, -39.1), (28, -39.4), (29, -39.1), (30, -35.8), (31, -29), (32, -22.2), (33, -15.2), (34, -9.6), (35, -6.7), (36, -3.2), (37, +8.8), (38, +20.8), (39, +29.3), (40, +34.9), (41, +32.6), (42, +32.6), (42.9, +32.6)],
+    # [3] 교차로3 -> 교차로4   도면 47cm, 총 +9도
+    [(0, +0), (1, +0), (2, +0), (3, +11.7), (4, +23.7), (5, +35.7), (6, +47.7), (7, +59.7), (8, +71.7), (9, +83.6), (10, +83.5), (11, +82.9), (12, +82.7), (13, +82.8), (14, +82.6), (15, +82.2), (16, +81.3), (17, +82.2), (18, +84.9), (19, +87.7), (20, +90.3), (21, +90.2), (22, +88.6), (23, +87.9), (24, +87.7), (25, +88.2), (26, +87.7), (27, +86.3), (28, +84.2), (29, +82.2), (30, +80.7), (31, +80.2), (32, +79.8), (33, +79.5), (34, +79.8), (35, +78.9), (36, +78.5), (37, +78.3), (38, +77.3), (39, +77.4), (40, +77.3), (41, +77.1), (42, +74.3), (43, +62.3), (44, +50.3), (45, +38.3), (46, +26.3), (47, +14.3), (47.4, +9.2)],
+    # [4] 교차로4 -> END   도면 58cm, 총 -111도
+    [(0, +0), (1, +0), (2, +0), (3, -12), (4, -24), (5, -36), (6, -48), (7, -60), (8, -72), (9, -75.2), (10, -75.5), (11, -75.8), (12, -75.6), (13, -76.3), (14, -76.5), (15, -76.7), (16, -77.4), (17, -78.6), (18, -80.7), (19, -82.8), (20, -84.6), (21, -85.5), (22, -85.8), (23, -87.3), (24, -88.4), (25, -89.2), (26, -90.5), (27, -91), (28, -91.4), (29, -93.1), (30, -93.6), (31, -94.3), (32, -95.6), (33, -96.6), (34, -97.4), (35, -98.5), (36, -99.1), (37, -99.8), (38, -100.6), (39, -101.4), (40, -101.8), (41, -102.5), (42, -103.4), (43, -103.9), (44, -104.3), (45, -105), (46, -105.8), (47, -105.8), (48, -106), (49, -107.3), (50, -108.2), (51, -108.3), (52, -108.9), (53, -109.6), (54, -109.7), (55, -110.1), (56, -111.1), (57, -111.3), (58, -111.3), (58.3, -111.3)],
 ]
 
-PATH_MODE = False       # run2 가 켠다. run 은 건드리지 않는다
-PATH_STEP_CM = 3.0      # 한 번에 눈 감고 가는 거리. 짧을수록 정확하고 느리다
-PATH_KP = 0.5           # 한 스텝에 헤딩 오차의 몇 배를 없앨지. 1.0 이면 한 번에 다 (진동)
-PATH_MAX_BIAS = 35      # 좌우 속도차 상한. 넘으면 속도를 낮춘다 (아래 참고)
-PATH_MIN_SPEED = 35     # 급커브에서 낮출 수 있는 속도의 바닥
+PATH_STEP_CM = 1.0      # 한 번에 눈 감고 가는 거리. 웨이포인트 간격(도면 1cm)과 맞춘다
+PATH_KP = 1.0           # 한 스텝에 헤딩 오차의 몇 배를 없앨지. 0.5 면 급커브에서 뒤처진다
+PATH_MAX_BIAS = 60      # 좌우 속도차 상한. 넘으면 속도를 낮춘다 (아래 참고)
+                        # 35 면 급커브를 못 돌아 구간 3 에서 3.0cm 벗어난다
+PATH_MIN_SPEED = 15     # 급커브에서 낮출 수 있는 속도의 바닥
 
 _leg = None             # 지금 타고 있는 구간 프로파일
 _leg_cm = 0.0           # 그 구간에서 지금까지 간 거리
@@ -826,55 +690,28 @@ def follow_path(duration_time, motor_speed=MOTOR_SPEED):
 
 
 def leg_begin(i):
-    """i 번째 구간의 외운 경로를 건다. run(PATH_MODE=False) 이면 아무것도 안 한다."""
+    """i 번째 구간의 외운 경로를 건다."""
     global _leg, _leg_cm
-    if PATH_MODE and i < len(PATH_LEGS):
+    if i < len(PATH_LEGS):
         _leg, _leg_cm = PATH_LEGS[i], 0.0
         print(f"  외운 경로 [{i}] 총 {_leg[-1][0]:.0f}cm / {_leg[-1][1]:+.0f}도")
 
-def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
-    """step 은 0.25 였는데 0.12 로 내렸다.
+def move_forward_on_road(duration_time, motor_speed=MOTOR_SPEED):
+    """외운 경로를 타고 전진한다. 이름은 호출부가 많아 그대로 뒀다.
 
-    바퀴 폭 111mm / 흰 도로 154mm → 좌우 여유 21.5mm. 곡선 반경이 약 55cm 이므로
-    한 스텝에 d 만큼 가면 도로가 d^2/(2*55cm) 만큼 옆으로 빠진다.
-    0.25초(12.5cm) 면 1.4cm — 여유 2.1cm 를 거의 다 먹는다. 0.12초(6cm) 면 0.3cm.
+    카메라 도로 추종은 폐기했다. 이 코스는 S자라 직진 구간이 없어서 근거리 도로가
+    항상 화면 밖으로 잘리고, 그러면 "가장 넓은 구간의 중점" 이 도로 중심이 아니게
+    된다. error 가 실제 치우침보다 작게 나와 로봇은 한쪽에 붙은 채 평형을 이룬다
+    (실측). 잘못된 기준을 게인으로 못 고친다.
+
+    짧은 전진은 조향하지 않는다 — 마커 정렬 직후의 미세 접근이라 여기서 또 꺾으면
+    정렬이 흐트러진다.
     """
-    """도로 중심을 보며 전진한다.
-
-    긴 전진을 짧게 쪼개고, 매 조각 직전에 도로를 보고 좌우 바퀴 속도를 다르게 준다.
-    원본은 목표까지 계산한 시간만큼 눈 감고 직진해서, 도로가 휘면 그대로 잔디로 나갔다.
-
-    짧은 전진(마지막 미세 접근)은 조향하지 않는다. 이미 아루코로 정렬된 상태라
-    거기서 또 꺾으면 정렬이 흐트러진다.
-    """
-    if duration_time < ROAD_MIN_STEER_TIME:
+    if duration_time < PATH_MIN_STEER_TIME or _leg is None:
         globals()["_leg_cm"] += duration_time * MOVE_FORWARD_PER_ONE
-        move_forward(duration_time, motor_speed)
-        return
-
-    if _leg is not None:
-        # run2. 카메라 대신 외운 경로를 탄다 (ROAD_FOLLOW 와 무관하다).
-        return follow_path(duration_time, motor_speed)
-
-    if not ROAD_FOLLOW:
         return move_forward(duration_time, motor_speed)
+    return follow_path(duration_time, motor_speed)
 
-    remaining = duration_time
-    while remaining > 0:
-        t = min(step, remaining)
-        s = road_steer(pinky_cam.get_frame())
-        if s is None:
-            print("  도로 안 보임 -> 직진")
-            bias = 0
-        else:
-            bias = int(motor_speed * ROAD_GAIN * s)
-        # 전진 중이므로 양쪽 다 앞으로 돌게 유지한다 (한쪽이 음수면 제자리 회전이 된다)
-        left = max(10, min(100, motor_speed + bias))
-        right = max(10, min(100, motor_speed - bias))
-        pinky_motor.move(left, right)
-        time.sleep(t)
-        pinky_motor.move(0, 0)
-        remaining -= t
 
 # ================================================================ 아루코
 
@@ -1003,12 +840,16 @@ def find_aruco(aruco_num, direction, try_count, deadline=None):
             time.sleep(SLEEP_TIME_AFTER_MOVE)
     return False, None
 
-def check_angle(aruco_num, target, allow_range=15):
+def check_angle(aruco_num, target, allow_range=5):
     """(맞았나, 돌아야 할 각도) 를 돌려준다. 못 보면 (False, None).
 
     예전엔 방향(LEFT/RIGHT)만 주고 호출부가 MATCH_STEP_DEG 씩 찔끔찔끔 돌았다.
     20도 어긋나 있으면 네 번을 돌아야 하고, 회전 한 번마다 coast 대기가 붙는다.
     x(좌우 cm)와 z(거리 cm)를 둘 다 아는데 각도를 모를 리가 없다 — 바로 계산한다.
+
+    allow_range 는 15 였다. 마커를 칠지 말지를 가르는 여유가 2cm 인데 허용오차가
+    15cm 라 정렬 루프가 한 번도 돌지 않았다 (실주행 5개 마커 오차 3.0~14.0 전부 통과).
+    ★ 이 값을 키우면 다시 마커를 친다.
     """
     success, pose = detect_target_aruco(aruco_num)
     if not success:
@@ -1018,6 +859,9 @@ def check_angle(aruco_num, target, allow_range=15):
     cur_x, z = pose[0][1], pose[0][3]
     off = cur_x - target
     print(f"current_pose_x {cur_x:.1f} target_pose_x {target} (오차 {off:+.1f}cm)")
+    if PATH_NO_MARKER_TURN:
+        print("  회전 안 함 — 방향은 외운 경로가 정한다")
+        return True, 0.0
     if abs(off) <= allow_range:
         return True, 0.0
 
@@ -1261,10 +1105,41 @@ def run_course():
         # 맵을 외웠으니 대부분의 거리는 카메라를 안 보고 먼저 간다. 마커는 마지막
         # 구간에서 "정확히 어디서 서고 어느 쪽을 보고 있나" 를 잡는 용도로만 쓴다.
         cm = target_list[i].get("cm")
+        if PATH_MARKER_CONFIRM_ONLY:
+            if cm:
+                print(f"  외운 거리 {cm}cm 이동 (마커로 보정하지 않는다)")
+                move_forward_on_road(cm / MOVE_FORWARD_PER_ONE)
+            ok, seen = detect_target_aruco(current_id)
+            _cal.append((current_id, cm, target_list[i]["pose"][1],
+                         seen[0][3] if ok else None,
+                         seen[0][1] if ok else None, ok))
+            print(f"  마커 {current_id} 확인: "
+                  + (f"z={seen[0][3]:.0f}cm x={seen[0][1]:+.0f}cm" if ok
+                     else "안 보임 — 경로대로 그대로 간다"))
+            result = True        # 마커를 못 봐도 멈추지 않는다. 경로가 위치를 안다
+            hop = target_list[i].get("hop") or 0
+            if hop:
+                print(f"  교차로까지 외운 {hop}cm 를 마저 간다")
+                move_forward_on_road(hop / MOVE_FORWARD_PER_ONE)
+            after_target_do_list(i)
+            print(f"----list num : {i} done -----")
+            continue
+
         if cm:
             blind = cm * APPROACH_BLIND_RATIO
-            print(f"  외운 거리 {cm}cm 중 {blind:.0f}cm 를 먼저 이동")
-            move_forward_on_road(blind / MOVE_FORWARD_PER_ONE)
+            # 눈 감고 가기 전에 한 프레임만 본다. 마커가 이미 보이면 외운 거리보다
+            # 눈을 믿는다 — 출발 위치가 몇 cm 앞이면 외운 만큼 밀다가 목표 z 를
+            # 지나치고, 그 거리(37cm 미만)에서는 마커가 아예 안 잡혀 두리번거린다.
+            ok, seen = detect_target_aruco(current_id)
+            if ok:
+                room = seen[0][3] - target_list[i]["pose"][1]
+                if room < blind:
+                    print(f"  마커가 이미 보인다 (z={seen[0][3]:.0f}cm, 목표까지 "
+                          f"{room:.0f}cm) -> 외운 {blind:.0f}cm 대신 그만큼만 간다")
+                    blind = max(0.0, room)
+            if blind > 0:
+                print(f"  외운 거리 {cm}cm 중 {blind:.0f}cm 를 먼저 이동")
+                move_forward_on_road(blind / MOVE_FORWARD_PER_ONE)
 
         result = track_target_aruco_marker(current_id, target_list[i]["pose"], SEARCH_COUNT)
         _cal.append((current_id, cm, target_list[i]["pose"][1], _last_arrival_z,
@@ -1380,21 +1255,6 @@ def cmd_run(*args):
         teardown()
 
 
-def cmd_run2(*args):
-    """run 과 같은 코스를, 카메라 도로 추종 대신 **외운 경로**로 달린다.
-
-        python3 drive.py run2
-
-    도로 형상은 대회 도면에서 딴 PATH_LEGS 이고, 헤딩은 IMU 로 닫는다.
-    마커 탐색·정렬·교차로 동작은 run 과 완전히 같은 코드를 쓴다 — 다른 건 조향뿐이다.
-    run 은 그대로 두었으니, 이쪽이 어긋나면 run 으로 돌아가면 된다.
-    """
-    global PATH_MODE
-    PATH_MODE = True
-    print("외운 경로 모드 (카메라 도로 추종 끔)")
-    return cmd_run(*args)
-
-
 def cmd_check():
     """출발 전 점검. 모터를 켜지 않으므로 로봇이 움직이지 않는다."""
     setup(motors=False)
@@ -1425,11 +1285,6 @@ def cmd_check():
         print("     보이는 마커:", [int(p[0]) for p in pose] if pose else "없음",
               "/ 첫 목표", target_list[0]["id"])
 
-        e, c = road_offset(frame)
-        if e is None:
-            print("FAIL 도로 인식 실패 — 'drive.py road' 로 임계값 확인"); ok = False
-        else:
-            print(f"OK   도로 error={e:+.2f} curve={c:+.2f} steer={road_steer(frame):+.2f}")
 
         print("\n" + ("=== 출발 가능 ===" if ok else "=== 위 FAIL 부터 고칠 것 ==="))
     finally:
@@ -1577,7 +1432,6 @@ def cmd_cal(*args):
         python3 drive.py cal --yes           # 묻지 않고 바로 기록
 
     준비 (한 자리에서 셋 다 된다):
-      · 로봇을 도로 한가운데, 진행 방향으로 똑바로   -> ROAD_CENTER_BIAS
       · 정면 45~65cm 에 아루코 마커 하나            -> MOVE_FORWARD_PER_ONE
       · 좌우로 한 바퀴 돌 공간                      -> TURN_DEG_PER_SEC, TURN_COAST_PER_SPEED
     끝나면 로봇은 처음 자리·처음 방향으로 돌아와 있다.
@@ -1595,12 +1449,6 @@ def cmd_cal(*args):
     try:
         if "road" in only:
             frame = pinky_cam.get_frame()
-            e, _ = road_offset(frame)
-            if e is None:
-                print("[도로] 도로가 안 보인다 -> 건너뜀")
-            else:
-                new["ROAD_CENTER_BIAS"] = round(ROAD_CENTER_BIAS - e * frame.shape[1] / 2)
-                print(f"[도로] error={e:+.3f} -> ROAD_CENTER_BIAS = {new['ROAD_CENTER_BIAS']}")
 
         if only & {"turn", "forward"}:
             warmup_motors()      # 냉간은 26% 느리다. 예열 전 값을 적으면 코스가 통째로 밀린다
@@ -1708,42 +1556,6 @@ def cmd_cal(*args):
     return 0
 
 
-def cmd_road(path=None):
-    """도로 마스크 확인. 사진 경로를 주면 그 사진으로, 없으면 지금 카메라로."""
-    if path:
-        frame = cv2.imread(path)
-        assert frame is not None, path
-    else:
-        setup(motors=False)
-        frame = pinky_cam.get_frame()
-        teardown()
-
-    e, c = road_offset(frame)
-    print(f"error={e} curve={c} steer={road_steer(frame)}")
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    low = hsv[int(frame.shape[0] * 0.8):].reshape(-1, 3)
-    print(f"아래 20%  S 중앙값 {np.median(low[:, 1]):.0f}  V 중앙값 {np.median(low[:, 2]):.0f}")
-    print(f"추천  ROAD_S_MAX = {np.percentile(low[:, 1], 60) + 15:.0f}  "
-          f"ROAD_V_MIN = {max(0, np.percentile(low[:, 2], 30) - 15):.0f}")
-    print(f"현재  ROAD_S_MAX = {ROAD_S_MAX}  ROAD_V_MIN = {ROAD_V_MIN}")
-    if e is not None:
-        # 지금 도로 한가운데에 똑바로 서 있다면, 남은 error 는 전부 카메라 편향이다.
-        print(f"추천  ROAD_CENTER_BIAS = {ROAD_CENTER_BIAS - e * frame.shape[1] / 2:.0f}"
-              f"   (현재 {ROAD_CENTER_BIAS})  ※ 도로 한가운데 똑바로 세운 상태에서만")
-
-    vis = frame.copy()
-    vis[road_mask(frame) > 0] = (0, 0, 255)
-    cv2.imwrite("road_check.jpg", vis)
-    print("road_check.jpg 저장 (빨강 = 도로로 인식한 영역)")
-    return 0
-
-
-ACTION_NAMES = {GO_STRAIGHT: "전진", MOVE_RIGHT: "우회전", MOVE_LEFT: "좌회전",
-                GO_BACKWARD: "후진", APPLE_COUNT_ACTION: "사과 세기",
-                GO_TO_MARKER: "마커까지 전진",
-                APPLE_DISPLAY: "LCD 표시", CROSS_WALK_WAIT: "대기"}
-
-
 def cmd_motors():
     """모터 방향 확인. 좌우가 바뀌어 있으면 코스 전체가 반대로 간다 — 제일 먼저 볼 것."""
     setup()
@@ -1792,6 +1604,12 @@ def cmd_track(marker_id, target_z=None):
         teardown()
 
 
+ACTION_NAMES = {GO_STRAIGHT: "전진", MOVE_RIGHT: "우회전", MOVE_LEFT: "좌회전",
+                GO_BACKWARD: "후진", APPLE_COUNT_ACTION: "사과 세기",
+                GO_TO_MARKER: "마커까지 전진",
+                APPLE_DISPLAY: "LCD 표시", CROSS_WALK_WAIT: "대기"}
+
+
 def cmd_actions(index):
     """after_track_list 의 한 항목만 실행해 본다 (회전 방향·PEEK 시간 확인용).
 
@@ -1814,10 +1632,59 @@ def cmd_actions(index):
     return 0
 
 
-CMDS = {"run": cmd_run, "run2": cmd_run2, "check": cmd_check, "pose": cmd_pose,
+def cmd_cam(port=8080):
+    """카메라를 브라우저로 실시간 송출한다. 로봇에 화면이 없어서 이 방법뿐이다.
+
+        python3 drive.py cam        # 노트북에서 http://192.168.4.1:8080 열기
+
+    아루코를 잡아 id / 좌우 x / 거리 z 를 겹쳐 그린다. 출발 자세를 맞추고 마커를
+    몇 cm 옆에 두는지 눈으로 보려는 것이다. 모터는 켜지 않는다.
+    """
+    import http.server
+    setup(motors=False)
+
+    def draw(frame):
+        vis = frame.copy()
+        h, w = vis.shape[:2]
+        cv2.line(vis, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
+        corners, pose = pinky_cam.detect_aruco(frame, marker_size=MARKER_SIZE_M)
+        for i, p in enumerate(pose or []):
+            cv2.putText(vis, f"id{int(p[0])} x{p[1]:+.0f} z{p[3]:.0f}",
+                        (8, 48 + 24 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        return vis
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass                                  # 프레임마다 로그 한 줄은 소음이다
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=f")
+            self.end_headers()
+            try:
+                while True:
+                    jpg = cv2.imencode(".jpg", draw(pinky_cam.get_frame()))[1].tobytes()
+                    self.wfile.write(b"--f\r\nContent-Type: image/jpeg\r\n"
+                                     b"Content-Length: %d\r\n\r\n" % len(jpg))
+                    self.wfile.write(jpg + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass                              # 브라우저 탭을 닫은 것. 정상 종료다
+
+    try:
+        print(f"http://192.168.4.1:{port}  (Ctrl-C 로 종료)")
+        http.server.ThreadingHTTPServer(("", int(port)), H).serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        teardown()
+    return 0
+
+
+CMDS = {"run": cmd_run, "check": cmd_check, "pose": cmd_pose,
         "motors": cmd_motors, "track": cmd_track, "actions": cmd_actions,
         "forward-cal": cmd_forward_cal, "turn-cal": cmd_turn_cal,
-        "road": cmd_road, "cal": cmd_cal}
+        "cal": cmd_cal, "cam": cmd_cam}
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"

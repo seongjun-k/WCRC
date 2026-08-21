@@ -46,12 +46,17 @@ def fake(m, imu=True, trim_err=0.0):
     return st
 
 
-def run_leg(i, cm, **kw):
-    """구간 i 를 cm 만큼 달리고 (궤적, 최종 헤딩) 을 돌려준다."""
+def run_leg(i, cm, gains=None, **kw):
+    """구간 i 를 cm 만큼 달리고 (궤적, 최종 헤딩) 을 돌려준다.
+
+    gains 로 추종기 상수를 덮어쓸 수 있다 (reload 뒤에 물려야 한다 — 밖에서
+    drive 에 직접 넣으면 여기 reload 가 도로 지운다).
+    """
     import importlib
     m = importlib.reload(drive)
+    for k, v in (gains or {}).items():
+        setattr(m, k, v)
     st = fake(m, **kw)
-    m.PATH_MODE = True
     m.leg_begin(i)
     m.follow_path(cm / m.MOVE_FORWARD_PER_ONE)
     return m, st
@@ -105,14 +110,19 @@ def main():
     assert dev_fb < 2.1, f"IMU 를 닫아도 도로를 나간다 ({dev_fb:.2f}cm)"
     assert dev_fb < dev_ff, "IMU 피드백이 열린 루프보다 나아지지 않았다"
 
-    # run 은 건드리지 않았어야 한다
+    # 마커는 로봇을 못 돌린다. 마커 x 하나로 방향과 좌우 위치를 동시에 못 맞추는데
+    # 예전 코드는 제자리 회전으로 x 를 맞춰서, 그 회전이 외운 경로를 통째로
+    # 망가뜨렸다 (실주행에서 28.8도 돌았다).
     import importlib
     m = importlib.reload(drive)
-    assert m.PATH_MODE is False, "PATH_MODE 기본값이 켜져 있다 — run 이 오염된다"
-    assert m._leg is None, "_leg 기본값이 걸려 있다"
-    m.leg_begin(0)
-    assert m._leg is None, "PATH_MODE 가 꺼졌는데 leg_begin 이 경로를 걸었다"
-    print("run 오염 없음 OK")
+    assert m.PATH_NO_MARKER_TURN, "마커 회전 차단이 꺼져 있다"
+    assert m.PATH_MARKER_CONFIRM_ONLY, "마커가 확인 전용이 아니다"
+    m.pinky_cam = types.SimpleNamespace(
+        get_frame=lambda: None,
+        detect_aruco=lambda f, marker_size=None: (None, [[1, 30.0, 0.0, 45.0]]))
+    aligned, deg = m.check_angle(1, -17)     # 오차 47cm — 원래라면 크게 돌 상황
+    assert aligned and deg == 0.0, f"마커가 회전을 시킨다 ({deg})"
+    print("마커 회전 차단 OK")
 
     if "--plot" in sys.argv:
         import cv2
