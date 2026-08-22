@@ -210,7 +210,7 @@ def check_undefined_names():
     """
     import ast, builtins
     tree = ast.parse(open(drive.__file__).read())
-    defined = set(dir(builtins)) | {"__file__"}   # 모듈 전역이라 builtins 에 없다
+    defined = set(dir(builtins))
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(n.name)

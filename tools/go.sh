@@ -4,6 +4,25 @@
 WCRC=/home/ksj/orca/projects/WCRC
 SSH=pinky@192.168.4.1
 AP=pinky_1186
+# 로봇 전용 USB 랜카드. 노트북 내장 와이파이는 인터넷에 그대로 둔다.
+# MAC 으로 찾는 이유: 인터페이스 이름(wlx...)이 바뀌어도 따라간다.
+USB_MAC=50:3d:d1:bc:0d:76
+
+# ★ iwgetid -r 을 쓰면 안 된다. 랜카드가 둘이면 첫 번째(내장) SSID 만 돌려줘서
+#   USB 가 이미 로봇에 붙어 있어도 "안 붙었다" 로 읽고, ifname 없이 재접속을 걸어
+#   내장 카드를 로봇 AP 로 끌고 간다 = 인터넷이 끊긴다.
+usb_if() {
+  local d
+  for d in /sys/class/net/*; do
+    [ "$(cat "$d/address" 2>/dev/null)" = "$USB_MAC" ] && { basename "$d"; return 0; }
+  done
+  return 1
+}
+
+# 붙었는지는 SSID 이름이 아니라 "로봇이 응답하나" 로 판단한다.
+# nmcli 가 돌려주는 건 프로필 이름이라 재접속 때마다 "pinky_1186 2" 처럼 늘어나
+# 이름 비교가 어긋난다 (실제로 겪었다). ping 은 그런 게 없다.
+robot_up() { ping -c1 -W2 -I "$1" 192.168.4.1 >/dev/null 2>&1; }
 
 red()  { printf '\033[31m%s\033[0m\n' "$*"; }
 grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -16,14 +35,18 @@ echo "════════════════════════�
 echo "  WCRC 주행$([ "$1" = check ] && echo ' — 점검만 (모터 안 돎)')"
 echo "════════════════════════════════════"
 
-# 1. 로봇 AP
-if [ "$(iwgetid -r 2>/dev/null)" != "$AP" ]; then
-  echo "[1/4] 로봇 와이파이에 붙는 중..."
-  nmcli dev wifi connect "$AP" password pinkypro >/dev/null 2>&1
-  sleep 3
-  [ "$(iwgetid -r 2>/dev/null)" = "$AP" ] || die "로봇 AP($AP)에 못 붙었다. 로봇 전원을 확인할 것."
+# 1. 로봇 AP — USB 랜카드로만 붙인다
+IF=$(usb_if) || die "로봇용 USB 랜카드가 안 보인다. USB 를 꽂고 다시 실행할 것."
+if ! robot_up "$IF"; then
+  echo "[1/4] 로봇 와이파이에 붙는 중 ($IF)..."
+  # 저장된 프로필을 올린다. `dev wifi connect` 를 쓰면 실패할 때마다 프로필이
+  # 하나씩 새로 생기고, 새 프로필은 USB 고정이 안 걸려 있어 내장 카드를 물 수 있다.
+  nmcli con up "$AP" ifname "$IF" >/dev/null 2>&1 \
+    || nmcli dev wifi connect "$AP" password pinkypro ifname "$IF" >/dev/null 2>&1
+  for _ in 1 2 3 4 5 6; do robot_up "$IF" && break; sleep 1; done
+  robot_up "$IF" || die "로봇($AP / 192.168.4.1)에 못 붙었다. 로봇 전원과 USB 를 확인할 것."
 fi
-grn "[1/4] 로봇 연결 OK"
+grn "[1/4] 로봇 연결 OK ($IF)"
 
 # 2. 서버
 if ! curl -s -m 3 -o /dev/null http://127.0.0.1:5000/; then
