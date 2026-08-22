@@ -126,7 +126,10 @@ PEEK_TIME = 0.28           # 17.72cm/s 로 5.0cm 전진 (과수원 진입 깊이
 # 정지선 -> END 는 고정 시간으로 못 간다. 마커10 을 잡는 위치가 앞 구간 오차만큼
 # 흔들리기 때문이다 (실측 두 번: z=29.5cm, 38.6cm — 9cm 차이).
 # 그래서 "잰 z 만큼 간다" 로 바꿨다. z 만큼 가면 마커10 과 나란히 서고 거기가 END 다.
-END_EXTRA_CM = 12          # 정지선 이후 END 까지. 실주행에서 34cm 가 맞았다
+END_EXTRA_CM = 7           # 정지선 이후 END 까지 (전 지점 -5cm 에 맞춰 12 -> 7).
+# END 만 따로 빼야 한다. 다른 지점은 앞 정지점에서의 상대 거리라 구간1 을 줄이면 같이
+# 당겨지는데, END 는 GO_TO_MARKER 가 마커10 을 그 자리에서 다시 재서 거리를 잡으므로
+# 앞 구간이 어디로 밀리든 마커10 기준의 같은 자리에 선다.
 
 # set_calibration() 은 기본값이 상대경로("camera_calibration.npz")라 노트북 위치에 따라
 # FileNotFoundError 가 난다. 로봇에 실제로 파일이 있는 절대경로를 박아둔다.
@@ -260,15 +263,38 @@ target_list = [
     # 그래서 그 자리에서 확인만 하고 외운 거리를 간다.
     # peek 는 확인하려고 잠깐 트는 각도다. 확인 뒤 같은 각도로 되돌려 방향을 지킨다.
     #
+    # 이제 다섯 개 전부 confirm 이다. 추적을 아예 안 쓴다.
+    #  - 신규 규정(상세 설명 1): 마커는 표시 위치에서 15cm 이내로 옮겨질 수 있다.
+    #    추적은 마커를 따라가므로 정지 지점이 그만큼 같이 흔들린다. 외운 거리는 안 흔들린다.
+    #  - 추적이 실제로 담당하던 구간은 마커1 이 4cm, 마커5 가 3cm 뿐이었다
+    #    (APPROACH_BLIND_RATIO=0.85). 그 몇 cm 를 얻자고 탐색 헛돌기 / 마커 놓침 루프 /
+    #    35초 타임아웃 / 마커 들이받기라는 실패 모드를 전부 떠안고 있었다.
+    # cm 을 0 으로 두고 hop 에 구간 전체를 넣는다. 단순히 cm+hop 을 더하면 안 된다 —
+    # 옛 추적 코드가 실제로 간 거리는 그 합보다 짧았다. cm 의 85%(APPROACH_BLIND_RATIO)만
+    # 눈감고 가고, 나머지는 추적이 목표 z 에 "도착" 판정을 내는 지점까지만 갔기 때문이다.
+    # 마커1: 22.1 눈감고 + 추적 0.5 + hop 26 = 48.6 -> 48  (26+26=52 였으면 3.4cm 초과)
+    # 마커5: 14.5 눈감고 + 추적 0.0 + hop 22 = 36.5 -> 36  (17+22=39 였으면 2.5cm 초과)
+    # 구간1 이 3.4cm 밀리면 그 뒤 정지 지점이 전부 3.4cm 밀린다.
+    #
+    # 그러고도 실주행에서 전 지점이 5cm 더 앞이었다. 구간들은 앞 정지점 기준의 상대
+    # 거리라, 구간1 만 48->43 으로 줄이면 뒤따르는 정지 지점이 전부 5cm 당겨진다.
+    # 구간마다 5 씩 빼면 안 된다 — 마지막 지점이 25cm 당겨진다.
+    # 마커는 이제 "봤다" 를 찍는 확인용이고, 거리에 쓰이는 곳은 마커10 -> END 하나뿐이다.
+    #
     # 마커1(교차로1) 의 hop 만 실주행에서 +5 했다. 거기만 회전 지점이 5cm 뒤였다.
-    {"id": 1,  "pose": [ +4, 20, RIGHT], "cm": 26, "hop": 26},   # 교차로1 (과수원A)
-    {"id": 2,  "pose": [-15, 32, LEFT ], "cm":  0, "hop": 43,
+    {"id": 1,  "pose": [ +4, 20, RIGHT], "cm":  0, "hop": 43,
+     "peek": 0, "confirm": True},                                # 교차로1 (과수원A)
+    {"id": 2,  "pose": [+16, 34, RIGHT], "cm":  0, "hop": 43,
      "peek": 0, "confirm": True},                                # 교차로2 (과수원B)
+    # ↑ -15(왼쪽) 로 적혀 있었다. 실주행에서 +16(오른쪽) 으로 잡힌다. 텔레옵으로 잴 때
+    #   로봇 방향이 달랐던 듯하다. peek 이 0 이라 지금 거동엔 영향이 없지만, 부호가
+    #   틀린 채로 두면 다음에 이 값을 믿고 반대쪽부터 훑게 된다.
     {"id": 4,  "pose": [-11, 40, LEFT ], "cm":  0, "hop": 35,
      "peek": 8, "confirm": True},                                # 교차로3 (과수원C)
     # ↑ 다가가다 놓쳐서 마커를 들이받았다. z=40 에서는 atan(11/40)=15도라 화각 안이지만
     #   16cm 다가가면 z=24, 각도가 25도로 화각 끝이라 프레임에서 사라진다.
-    {"id": 5,  "pose": [ -1, 20, LEFT ], "cm": 17, "hop": 22},   # 교차로4 (하차장)
+    {"id": 5,  "pose": [ -1, 20, LEFT ], "cm":  0, "hop": 36,
+     "peek": 0, "confirm": True},                                # 교차로4 (하차장)
     {"id": 10, "pose": [-18, 39, LEFT ], "cm":  0, "hop": 22,
      "peek": 0, "confirm": True},                                # 횡단보도 정지선
 ]
@@ -437,6 +463,7 @@ def display_apple_count(apple_count):
 # 거리 캘리브레이션이 되게 하려는 것 — 따로 측정 모드를 돌릴 시간이 없다.
 _cal = []
 _last_arrival_z = None
+_last_arrival_id = None    # 그 z 가 어느 마커의 것인지. 덮어쓰기 사고를 막는다
 
 _apple_jobs = []
 
@@ -1017,6 +1044,7 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
 
         if arrived:
             _last_arrival_z = last_z
+            globals()["_last_arrival_id"] = aruco_num
             print(f"도착 (마지막으로 본 거리 {last_z:.0f}cm)" if last_z else "도착")
             break
 
@@ -1089,7 +1117,8 @@ def after_target_do_list(index):
             if nxt is not None:
                 ok, seen = detect_target_aruco(nxt)
                 if ok:
-                    _last_arrival_z = seen[0][3]
+                    globals()["_last_arrival_z"] = seen[0][3]
+                    globals()["_last_arrival_id"] = nxt
                     print(f"  다음 마커 {nxt} 확인 (x={seen[0][1]:+.0f} z={seen[0][3]:.0f})")
                 else:
                     print(f"  다음 마커 {nxt} 안 보임 — 외운 거리로 간다")
@@ -1177,11 +1206,18 @@ def run_course():
             if deg:
                 turn_deg(deg)
             result, seen = detect_target_aruco(current_id)
+            # GO_TO_MARKER 가 이 값을 쓴다. 못 봤을 때 그냥 두면 직전 마커의 거리가
+            # 그대로 남아 END 가 15cm 모자란다 (실주행: 마커10 을 44 로 재고도 마커5 의
+            # 23 을 써서 19cm 만 갔다). 못 봤으면 외운 z 로 떨어뜨려 stale 을 없앤다.
             if result:
-                # GO_TO_MARKER 가 이 값을 쓴다. 안 넣으면 직전 마커의 거리가 그대로
-                # 남아 END 가 15cm 모자란다 (실주행: 마커10 을 44 로 재고도 마커5 의
-                # 23 을 써서 19cm 만 갔다).
                 globals()["_last_arrival_z"] = seen[0][3]
+                globals()["_last_arrival_id"] = current_id
+            elif _last_arrival_id != current_id:
+                # 직전 구간의 CHECK_NEXT 가 이미 이 마커를 실측해 뒀으면 그게 더 정확하다.
+                # 실제로 마커10 을 CHECK_NEXT 가 35.1 로 쟀는데 여기서 외운 39 로 덮어
+                # END 를 3.9cm 더 갔다. 이 마커의 값이 아직 없을 때만 외운 값을 쓴다.
+                globals()["_last_arrival_z"] = target_list[i]["pose"][1]
+                globals()["_last_arrival_id"] = current_id
             print(f"  마커 {current_id} " + (
                 f"확인 (x={seen[0][1]:+.0f} z={seen[0][3]:.0f})" if result
                 else "안 보임 — 그래도 외운 거리로 간다"))
@@ -1224,21 +1260,18 @@ def run_course():
 
     pinky_motor.move(0, 0)
     print("\n===== 거리 캘리브레이션 =====")
-    print(" 마커   cm   목표z   실제z=권장hop   판정")
+    print(" 마커   cm   목표z    실제z   마커~교차로 여유")
     for mid, cm, tz, az, ok in _cal:
         if az is None:
             print(f" {mid:>4}  {cm:>4}   {tz:>4}    ----   마커 실패 — cm 이 너무 길거나 짧다")
             continue
-        # 마커가 교차로 옆에 붙어 있으므로 "마커까지 남은 깊이" 가 곧 교차로까지의 거리다.
-        # (마커1 에서 z=21.2 / hop 23 으로 완주 성공한 것이 이 규칙의 근거)
+        # 이제 전부 confirm 이라 z 는 "구간 시작에서 마커까지" 다. 교차로는 마커보다
+        # 조금 더 가야 나오므로 hop = z + gap 이고, 우리가 볼 건 그 gap 이다.
+        # gap 이 주행마다 크게 흔들리면 마커가 옮겨졌거나 거리 상수가 틀린 것이다.
+        # hop 을 z 로 맞추라던 옛 조언은 추적 시절(마커 자리에서 z 를 재던 때) 규칙이라 버렸다.
         hop_now = next(t["hop"] for t in target_list if t["id"] == mid)
-        if mid == 10:
-            # 마커10 의 hop 은 "교차로까지" 가 아니라 "횡단보도 정지선까지" 라 규칙이 다르다.
-            # END 까지는 이 z 를 그대로 써서 가므로(GO_TO_MARKER) 손댈 게 없다.
-            note = "정지선 기준 — hop 규칙 해당 없음"
-        else:
-            note = "OK" if abs(az - hop_now) <= 4 else f"hop {hop_now} -> {az:.0f} 로 바꿀 것"
-        print(f" {mid:>4}  {cm:>4}   {tz:>4}   {az:5.1f}   {note}")
+        print(f" {mid:>4}  {cm:>4}   {tz:>4}   {az:5.1f}   "
+              f"hop {hop_now} - z = gap {hop_now - az:+.1f}cm")
     total_apple_count += collect_apple_counts()   # 아직 안 거둔 게 있으면 여기서
     print(f"\n===== 주행 종료. 사과 {total_apple_count}개 / "
           f"{time.time() - start_time:.0f}초 =====")
