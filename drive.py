@@ -114,7 +114,12 @@ MARKER_TIMEOUT = 35
 # 과수원·하차장을 "살짝 들여다보는" 전진/후진 시간(초).
 # 가지 안까지 들어가지 않는다. 90도 돌아 코만 들이밀고 세고 그대로 후진해서 뺀다.
 # 전진과 후진을 같은 값으로 둬야 원래 자리로 돌아온다.
-PEEK_TIME = 0.28           # 17.72cm/s 로 5.0cm 전진 (과수원 진입 깊이)
+PEEK_TIME = 0.15           # 17.72cm/s 로 2.7cm 전진 (과수원 진입 깊이)
+# 0.28(5.0cm) 이었다. 원래 이만큼 들어간 건 사과를 조금이라도 크게 찍으려던 것인데,
+# 서버(tools/serve.py)에 상단 크롭 전처리를 넣으면서 그 의존이 없어졌다.
+# 전진 없이 찍은 나무 앞 5프레임이 크롭으로 5/5 잡힌다.
+# 규정도 상세 설명 3 에서 "과수원을 향해 주행하는 액션이 있으면 진입 인정" 으로
+# 완화됐다. 왕복 0.26초 x 4 군데 = 약 1초.
 # 5cm 는 실측으로 정한 값이다: 나무 앞에서 0cm 일 때는 사과가 작아 0개였고,
 # 5.3cm 들어가자 1개로 잡혔다. 더 깊이 갈 이유가 없다 — 가지가 28~34cm 라
 # 깊이 들어갈수록 후진 거리도 늘고 랩타임만 먹는다.
@@ -165,8 +170,14 @@ SEARCH_COUNT = 10          # 탐색 스텝 수. 10 x 6도 = 60도.
 # 반 바퀴를 훑는 건 낭비고, 그만큼 로봇 방향도 틀어진다.
 # 지정한 방향으로 60도 훑고, 없으면 반대로 60도 훑는다. 그래도 없으면 거리 문제이므로
 # find_aruco 가 앞으로 조금 가서 다시 본다.
-APPLE_CHECK_COUNT = 5     # 서버로 보낼 장수. 중앙값을 쓰므로 홀수로 둔다
-APPLE_SHOT_GAP = 0.08     # 3장 사이 간격. 같은 프레임 3장이면 최댓값이 의미 없다
+APPLE_CHECK_COUNT = 3     # 서버로 보낼 장수. 중앙값을 쓰므로 홀수로 둔다.
+# 짝수로 두면 안 된다. sorted(cs)[len//2] 가 큰 쪽을 집어 사실상 최댓값이 되고,
+# 오탐 한 장이 그대로 답이 된다 (실측: 21프레임 중 1장이 오탐 2개).
+APPLE_SHOT_GAP = 0.02     # 장 사이 간격.
+# 0.08 이었는데 낭비였다. get_frame() 이 새 프레임을 기다리는 구조라 간격을 0 으로
+# 둬도 중복 프레임이 안 생긴다 (로봇 실측: gap 0.00 에서 5장 132ms, 중복 0/4).
+# 0 대신 0.02 인 건 프레임 사이 장면 차이를 조금이라도 벌려두려는 것이다.
+# 시간은 gap 0.00 과 차이가 없다 (측정 오차 안).
 APPLE_JOIN_TIMEOUT = 6.0  # 서버가 죽어도 여기서 더 안 기다린다
 APPLE_SHOT_DIR = "/home/pinky/apple_shots"   # 서버로 보낸 사진을 여기 남긴다
 
@@ -290,7 +301,10 @@ target_list = [
     #   로봇 방향이 달랐던 듯하다. peek 이 0 이라 지금 거동엔 영향이 없지만, 부호가
     #   틀린 채로 두면 다음에 이 값을 믿고 반대쪽부터 훑게 된다.
     {"id": 4,  "pose": [-11, 40, LEFT ], "cm":  0, "hop": 35,
-     "peek": 8, "confirm": True},                                # 교차로3 (과수원C)
+     "peek": 0, "confirm": True},                                # 교차로3 (과수원C)
+    # ↑ peek 8 이었다. 확인하려고 8도 틀었다 되돌리는 회전 2번인데, 마커4 의 z 는
+    #   어디에도 안 쓴다 (거리는 전부 외운 hop 이다). 회전 하나가 1.08초라 순손해다.
+    #   틀지 않아도 보이면 cal 표에는 그대로 찍힌다.
     # ↑ 다가가다 놓쳐서 마커를 들이받았다. z=40 에서는 atan(11/40)=15도라 화각 안이지만
     #   16cm 다가가면 z=24, 각도가 25도로 화각 끝이라 프레임에서 사라진다.
     {"id": 5,  "pose": [ -1, 20, LEFT ], "cm":  0, "hop": 36,
@@ -320,9 +334,11 @@ after_track_list = [
                            # 90도를 한 번에 돌아오지 않는다. 80도에서 멈추면 아직
                            # 과수원 쪽으로 10도 틀어져 있는데, 마커2 가 그쪽에 있어
                            # 화면 한가운데로 들어온다. 확인하고 남은 10도를 마저 돈다.
-                           (MOVE_LEFT, 80),
-                           (CHECK_NEXT, DEFAULT),
-                           (MOVE_LEFT, 10)]},
+                           # 80+10 로 쪼개서 중간에 마커2 를 봤었다. 마커2 의 z 는
+                           # 아무데도 안 쓰는데 회전만 하나 늘어난다(1.08초). 90 으로
+                           # 합치고, 확인은 다 돌고 나서 그 자리에서 한다 (0.015초).
+                           (MOVE_LEFT, 90),
+                           (CHECK_NEXT, DEFAULT)]},
 
     # 교차로2 → 과수원B (북쪽): 왼쪽
     {"id": 2,  "actions": [(MOVE_LEFT, 90),
@@ -344,8 +360,14 @@ after_track_list = [
                            (GO_STRAIGHT, PEEK_TIME),
                            (APPLE_DISPLAY, DEFAULT),
                            (GO_BACKWARD, PEEK_TIME),
+                           # 여기만 80+10 분할을 남긴다. 마커1 쪽은 합쳤는데
+                           # 여기는 CHECK_NEXT 가 읽는 마커10 의 z 가 END 거리에
+                           # 실제로 쓰이는 유일한 값이라 그렇다 (GO_TO_MARKER).
+                           # 못 읽으면 외운 39 로 떨어지는데 실측은 44 라 5cm 어긋난다.
+                           # 규정 9번이 "앞바퀴가 도착선을 밟거나 넘어야 통과" 라
+                           # END 는 5cm 가 통과 여부를 가른다. 회전 하나 값은 한다.
                            (MOVE_RIGHT, 80),
-                           (CHECK_NEXT, DEFAULT),      # 마커10 도 같은 방법으로
+                           (CHECK_NEXT, DEFAULT),
                            (MOVE_RIGHT, 10),
 ]},
 
@@ -462,12 +484,32 @@ def display_apple_count(apple_count):
 # 주행할 때마다 마커별 "목표 z vs 실제로 멈춘 z" 를 모은다. 주행 자체가
 # 거리 캘리브레이션이 되게 하려는 것 — 따로 측정 모드를 돌릴 시간이 없다.
 _cal = []
+# 주행 시간이 어디로 가는지 재는 계측기. 함수를 감싸기만 하므로 거동은 안 바뀐다.
+# 31초 중 계산으로 설명되는 건 19.7초뿐이라 나머지 11초를 찾으려고 넣었다.
+_timing = {}
+
+
+def _timed(label):
+    def deco(fn):
+        def wrap(*a, **kw):
+            t = time.time()
+            try:
+                return fn(*a, **kw)
+            finally:
+                _timing[label] = _timing.get(label, 0.0) + time.time() - t
+        wrap.__name__ = fn.__name__
+        wrap.__doc__ = fn.__doc__
+        return wrap
+    return deco
+
+
 _last_arrival_z = None
 _last_arrival_id = None    # 그 z 가 어느 마커의 것인지. 덮어쓰기 사고를 막는다
 
 _apple_jobs = []
 
 
+@_timed("사진촬영")
 def start_apple_count():
     """사진만 찍어두고 서버 전송은 백그라운드로 넘긴다.
 
@@ -506,6 +548,7 @@ def start_apple_count():
     _apple_jobs.append((th, box))
 
 
+@_timed("사과집계대기")
 def collect_apple_counts():
     """백그라운드로 보낸 사과 개수를 전부 거둬 합계를 돌려준다."""
     total = 0
@@ -589,6 +632,7 @@ def _turn_once(deg, speed):
     return turned
 
 
+@_timed("회전")
 def turn_deg(deg):
     """제자리에서 deg 도 돈다 (양수 = 우회전). 실제로 돈 각도를 돌려준다.
 
@@ -759,6 +803,7 @@ def road_steer(frame):
     return float(np.clip(-(ROAD_KP * error + ROAD_KD * curve), -1, 1))
 
 
+@_timed("도로주행")
 def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
     """step 은 0.25 였는데 0.12 로 내렸다.
 
@@ -783,7 +828,11 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
     remaining = duration_time
     while remaining > 0:
         t = min(step, remaining)
-        s = road_steer(pinky_cam.get_frame())
+        _fr = time.time()
+        _frame = pinky_cam.get_frame()
+        _timing["└ 그중 카메라대기"] = (_timing.get("└ 그중 카메라대기", 0.0)
+                                       + time.time() - _fr)
+        s = road_steer(_frame)
         if s is None:
             print("  도로 안 보임 -> 직진")
             bias = 0
@@ -799,6 +848,7 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
 
 # ================================================================ 아루코
 
+@_timed("마커검출")
 def detect_target_aruco(aruco_num):
     """한 프레임에서 목표 id 마커를 찾는다.
 
@@ -1093,7 +1143,7 @@ def after_target_do_list(index):
             display_apple_count(total_apple_count)
         elif action_inside == APPLE_COUNT_ACTION:
             start_apple_count()
-            print("사진 3장 촬영 — 서버 전송은 주행하면서 백그라운드로")
+            print(f"사진 {APPLE_CHECK_COUNT}장 촬영 — 서버 전송은 주행하면서 백그라운드로")
         elif action_inside == GO_TO_MARKER:
             # 마커를 잡았을 때 실제로 잰 거리를 쓴다. 고정 시간보다 정확하다.
             # z 는 "마커 고정 시점" 기준이므로, 그 뒤에 이미 간 hop 만큼은 빼야 한다.
@@ -1273,8 +1323,14 @@ def run_course():
         print(f" {mid:>4}  {cm:>4}   {tz:>4}   {az:5.1f}   "
               f"hop {hop_now} - z = gap {hop_now - az:+.1f}cm")
     total_apple_count += collect_apple_counts()   # 아직 안 거둔 게 있으면 여기서
-    print(f"\n===== 주행 종료. 사과 {total_apple_count}개 / "
-          f"{time.time() - start_time:.0f}초 =====")
+    elapsed = time.time() - start_time
+    print("\n===== 시간 분해 =====")
+    inner = sum(v for k, v in _timing.items() if not k.startswith("└"))
+    for k, v in sorted(_timing.items(), key=lambda kv: -kv[1]):
+        print(f" {k:>14s} {v:6.2f}초 ({v / elapsed * 100:4.1f}%)")
+    print(f" {'설명 안 되는 몫':>14s} {elapsed - inner:6.2f}초 "
+          f"({(elapsed - inner) / elapsed * 100:4.1f}%)")
+    print(f"\n===== 주행 종료. 사과 {total_apple_count}개 / {elapsed:.0f}초 =====")
     display_apple_count(total_apple_count)
 
 
