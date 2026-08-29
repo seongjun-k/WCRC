@@ -521,7 +521,9 @@ ROAD_MIN_STEER_TIME = 0.15 # 이보다 짧은 전진은 그냥 직진 (마지막
 # 조향은 조각마다 다시 주되 정지는 하지 않는다 (2026-08-29). True 로 두면 예전 거동.
 # ★ 이걸 끄면 같은 시간에 더 멀리 간다. MOVE_FORWARD_PER_ONE 을 `road-cal` 로 다시
 #   재기 전까지는 HOP 거리가 그만큼 길어지므로 반드시 재측정할 것.
-ROAD_STOP_BETWEEN_STEPS = False
+# 2026-08-29: 경기장 바닥을 못 써서 road-cal 을 실제 매트에서 못 잰다. 재기 전에
+# False 로 두면 HOP 이 통째로 오버슈트하므로, 검증 전까지는 True(예전 거동)로 둔다.
+ROAD_STOP_BETWEEN_STEPS = True
 
 
 def _otsu(ch, lo, hi):
