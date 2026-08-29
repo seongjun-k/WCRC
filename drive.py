@@ -12,7 +12,7 @@
     python3 drive.py pose         # 보이는 마커의 x, z — HOP / END_EXTRA_CM 보정용
 
 단계별 테스트:  motors -> track 1 -> actions 0 -> run
-측정:          forward-cal (전진속도) / turn-cal (회전) / teleop / road [사진]
+측정:          forward-cal (연속) / road-cal (도로추종·실제값) / turn-cal / teleop / road
 PC 검증:       python tools/sim_drive.py  /  python tools/road.py
 """
 import math
@@ -517,6 +517,12 @@ ROAD_GAIN = 0.5          # 조향을 바퀴 속도차로 얼마나 낼지 (0=직
 ROAD_MIN_STEER_TIME = 0.15 # 이보다 짧은 전진은 그냥 직진 (마지막 미세 접근)
 # 0.4 였는데 0.15 로 내렸다.
 
+# 조각 사이마다 모터를 껐다 켜면 주행 한 번에 80번쯤 서고 출발한다 = 눈에 보이는 딸꾹질.
+# 조향은 조각마다 다시 주되 정지는 하지 않는다 (2026-08-29). True 로 두면 예전 거동.
+# ★ 이걸 끄면 같은 시간에 더 멀리 간다. MOVE_FORWARD_PER_ONE 을 `road-cal` 로 다시
+#   재기 전까지는 HOP 거리가 그만큼 길어지므로 반드시 재측정할 것.
+ROAD_STOP_BETWEEN_STEPS = False
+
 
 def _otsu(ch, lo, hi):
     """이 프레임 안에서 밝은/어두운(또는 저채도/고채도) 경계를 스스로 찾는다."""
@@ -640,8 +646,10 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
         right = max(10, min(100, motor_speed - bias))
         pinky_motor.move(left, right)
         time.sleep(t)
-        pinky_motor.move(0, 0)
+        if ROAD_STOP_BETWEEN_STEPS:
+            pinky_motor.move(0, 0)
         remaining -= t
+    pinky_motor.move(0, 0)
 
 # ================================================================ 아루코
 
@@ -1195,6 +1203,33 @@ def cmd_forward_cal():
     return 0
 
 
+def cmd_road_cal():
+    """도로 추종 모드의 실제 전진 속도. forward-cal(연속 주행)과 다를 수 있다.
+
+    forward-cal 은 move_forward 로 1초 쭉 가서 재는데, 실제 주행은 전부
+    move_forward_on_road 를 쓴다. 조각내기 때문에 그 둘의 속도가 다르고,
+    HOP 거리는 이 값으로 시간이 환산된다. 그러니 여기서 잰 값을 써야 맞다.
+
+    마커가 정면에 보이는 자리에 두고 실행한다.
+    """
+    setup()
+    try:
+        def z():
+            _, p = pinky_cam.detect_aruco(pinky_cam.get_frame(), marker_size=MARKER_SIZE_M)
+            assert p, "마커가 안 보인다"
+            return p[0][3]
+        print(f"조각 사이 정지: {'있음(예전 거동)' if ROAD_STOP_BETWEEN_STEPS else '없음'}")
+        z1 = z()
+        move_forward_on_road(1.0)
+        time.sleep(0.5)
+        z2 = z()
+        print(f"z {z1:.1f} -> {z2:.1f}")
+        print(f"MOVE_FORWARD_PER_ONE = {abs(z2 - z1):.3f}   <- drive.py 에 입력")
+    finally:
+        teardown()
+    return 0
+
+
 def cmd_turn_cal():
     """IMU 로 닫은 회전이 실제로 맞는지 확인한다."""
     setup()
@@ -1436,7 +1471,7 @@ addEventListener('blur',()=>send(' '));
 
 CMDS = {"run": cmd_run, "check": cmd_check, "pose": cmd_pose,
         "motors": cmd_motors, "track": cmd_track, "actions": cmd_actions,
-        "forward-cal": cmd_forward_cal, "turn-cal": cmd_turn_cal,
+        "forward-cal": cmd_forward_cal, "road-cal": cmd_road_cal, "turn-cal": cmd_turn_cal,
         "road": cmd_road, "teleop": cmd_teleop}
 
 if __name__ == "__main__":
