@@ -125,6 +125,20 @@ APPLE_JOIN_TIMEOUT = 3.0          # 6.0 -> 3.0. 마커1·2 사진은 이미 끝�
 APPLE_SHOT_DIR = "/home/pinky/apple_shots"   # 주행마다 그 아래에 폴더 하나
 run_dir = APPLE_SHOT_DIR                     # 실제 저장 위치. setup() 이 정한다
 
+
+def _log(*a):
+    """진단 메시지를 화면 대신 파일에만 남긴다 (2026-08-29).
+
+    "마커 안 보임", "도로 안 보임" 같은 실패 로그가 터미널에 뜨면 옆 팀이 보고
+    시비를 걸 수 있다. 값 자체는 다음 주행 보정에 필요하니 버리지는 않는다.
+    go.sh 가 주행 뒤 사진 폴더를 통째로 가져오므로 이 파일도 같이 딸려온다.
+    """
+    try:
+        with open(f"{run_dir}/run.log", "a", encoding="utf-8") as f:
+            f.write(" ".join(str(x) for x in a) + "\n")
+    except OSError:
+        pass
+
 # 규정 3번: 잘 익은 사과 = 빨간 사과만 카운팅
 total_apple_count = 0
 
@@ -230,7 +244,7 @@ def send_image_and_get_count(image_input, retries=2, retry_wait=0.5):  # 이미�
                 # 메모리 상에서 즉시 JPEG 바이너리로 인코딩 (파일 저장 없이 고속 처리)
                 success, img_encoded = cv2.imencode('.jpg', image_input)
                 if not success:
-                    print(" image encoding failed")
+                    _log(" image encoding failed")
                     return None
 
                 files = {'image': ('robot_frame.jpg', img_encoded.tobytes(), 'image/jpeg')}
@@ -247,7 +261,7 @@ def send_image_and_get_count(image_input, retries=2, retry_wait=0.5):  # 이미�
                 if 'detected_count' in res_data:
                     count = res_data['detected_count']
                 else:
-                    print("warning:'detected_count' key is missing in Server response")
+                    _log("warning:'detected_count' key is missing in Server response")
                     count = 0
 
                 print(f"detected count: {count} (file name: {res_data.get('saved_filename')})")
@@ -259,11 +273,11 @@ def send_image_and_get_count(image_input, retries=2, retry_wait=0.5):  # 이미�
                 return None
 
             else:
-                print(f" Server status error (code {response.status_code}):", response.text)
+                _log(f" Server status error (code {response.status_code}):", response.text)
                 return None
 
         except Exception as e:
-            print(f"Communication exception (시도 {attempt + 1}/{retries}):", e)
+            _log(f"Communication exception (시도 {attempt + 1}/{retries}):", e)
             if attempt + 1 < retries:
                 time.sleep(retry_wait)
     return None
@@ -352,7 +366,7 @@ def start_apple_count():
         try:
             cv2.imwrite(f"{run_dir}/apple_{n}_{i}.jpg", f)
         except Exception as e:
-            print("  사진 저장 실패:", e)
+            _log("  사진 저장 실패:", e)
     print(f"  사진 {len(frames)}장 저장 -> {run_dir}/apple_{n}_*.jpg")
     box = {}
 
@@ -374,7 +388,7 @@ def collect_apple_counts():
     for th, box in _apple_jobs:
         th.join(timeout=APPLE_JOIN_TIMEOUT)
         if th.is_alive():
-            print("  [경고] 사과 개수 서버 응답 없음 — 그 과수원은 0개로 친다")
+            _log("  [경고] 사과 개수 서버 응답 없음 — 그 과수원은 0개로 친다")
         total += box.get("n", 0)
     _apple_jobs.clear()
     return total
@@ -617,7 +631,7 @@ def move_forward_on_road(duration_time, step=0.12, motor_speed=MOTOR_SPEED):
                                        + time.time() - _fr)
         s = road_steer(_frame)
         if s is None:
-            print("  도로 안 보임 -> 직진")
+            _log("  도로 안 보임 -> 직진")
             bias = 0
         else:
             bias = int(motor_speed * ROAD_GAIN * s)
@@ -638,7 +652,7 @@ def detect_target_aruco(aruco_num):
     output_frame, pose = pinky_cam.detect_aruco(frame, marker_size=MARKER_SIZE_M)
 
     if not pose:
-        print("None is detected")
+        _log("None is detected")
         return False, None
 
     for p in pose:
@@ -647,13 +661,13 @@ def detect_target_aruco(aruco_num):
         z = p[3]
         # 거리로 한 번 거른다.
         if not (Z_ACCEPT_MIN <= z <= Z_ACCEPT_MAX):
-            print(f"Target id:{aruco_num} z:{z:.1f} — 거리 밖이라 무시 "
+            _log(f"Target id:{aruco_num} z:{z:.1f} — 거리 밖이라 무시 "
                   f"({Z_ACCEPT_MIN}~{Z_ACCEPT_MAX}cm 만 인정)")
             continue
         print(f"Target detected  id:{int(p[0])} x:{p[1]:.1f} y:{p[2]:.1f} z:{z:.1f}")
         return True, [p]              # 호출부가 pose[0][n] 을 쓰므로 리스트로 감싼다
 
-    print("Target not detected (보이는 id:", [int(p[0]) for p in pose], ")")
+    _log("Target not detected (보이는 id:", [int(p[0]) for p in pose], ")")
     return False, None
 
 
@@ -671,14 +685,14 @@ def find_aruco_with_try_count(aruco_num, direction, try_count, deadline=None):
     y0 = read_yaw()
     for i in range(try_count):
         if deadline and time.time() > deadline:
-            print("  탐색 중단 (시간 초과)")
+            _log("  탐색 중단 (시간 초과)")
             break
         success, pose = detect_target_aruco(aruco_num)
         if success:
             print("find_aruco, detected")
             return True, pose
         turn(chunk, SEARCH_SCAN_SPEED)
-        print(f"search {i + 1}/{try_count} ({SEARCH_STEP_DEG * (i + 1)}/{span}도)")
+        _log(f"search {i + 1}/{try_count} ({SEARCH_STEP_DEG * (i + 1)}/{span}도)")
 
     # 마지막 한 번 더 본다 (마지막 회전 뒤를 안 보고 끝내면 손해다)
     success, pose = detect_target_aruco(aruco_num)
@@ -717,7 +731,7 @@ def find_aruco(aruco_num, direction, try_count, deadline=None):
     """지정 방향 -> 반대 방향으로 훑고, 그래도 없으면 조금 전진해서 다시 본다."""
     for attempt in range(FIND_ADVANCE_TRIES + 1):
         if deadline and time.time() > deadline:
-            print(f"  마커 {aruco_num} 탐색 시간 초과")
+            _log(f"  마커 {aruco_num} 탐색 시간 초과")
             return False, None
         result, pose = find_aruco_with_try_count(aruco_num, direction, try_count, deadline)
         if result:
@@ -730,7 +744,7 @@ def find_aruco(aruco_num, direction, try_count, deadline=None):
             return True, pose
 
         if attempt < FIND_ADVANCE_TRIES and not (deadline and time.time() > deadline):
-            print(f"  마커 {aruco_num} 안 보임 — {FIND_ADVANCE_CM}cm 전진 후 재탐색 "
+            _log(f"  마커 {aruco_num} 안 보임 — {FIND_ADVANCE_CM}cm 전진 후 재탐색 "
                   f"({attempt + 1}/{FIND_ADVANCE_TRIES})")
             move_forward_on_road(FIND_ADVANCE_CM / MOVE_FORWARD_PER_ONE)
             time.sleep(SLEEP_TIME_AFTER_MOVE)
@@ -740,7 +754,7 @@ def check_angle(aruco_num, target, allow_range=15):
     """(맞았나, 돌아야 할 각도) 를 돌려준다."""
     success, pose = detect_target_aruco(aruco_num)
     if not success:
-        print("check_angle, not detected")
+        _log("check_angle, not detected")
         return False, None
 
     cur_x, z = pose[0][1], pose[0][3]
@@ -760,7 +774,7 @@ def check_distance(aruco_num, target, allow_range=5):
     """(도착했나, 전진할 시간, 지금 본 z) 를 돌려준다."""
     success, pose = detect_target_aruco(aruco_num)
     if not success:
-        print("check_distance, not detected")
+        _log("check_distance, not detected")
         return False, None, None
 
     cur_pose_z = pose[0][3]
@@ -783,14 +797,14 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
 
     ok, pose = find_aruco(aruco_num, target_direction, try_count, deadline)
     if not ok:
-        print("track_target_aruco_marker find_aruco_failed")
+        _log("track_target_aruco_marker find_aruco_failed")
         return False
 
     # --- 각도(x) 맞추기 ---
     lost = 0
     while True:
         if time.time() > deadline:
-            print(f"[timeout] 마커 {aruco_num} 각도 정렬 {timeout}초 초과, 포기")
+            _log(f"[timeout] 마커 {aruco_num} 각도 정렬 {timeout}초 초과, 포기")
             return False
 
         aligned, angle_deg = check_angle(aruco_num, target_x)
@@ -799,12 +813,12 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
 
         if angle_deg is None:                # 마커를 놓쳤다
             lost += 1
-            print("angle: 마커 놓침", lost)
+            _log("angle: 마커 놓침", lost)
             if lost >= 5:
                 lost = 0
                 ok, _ = find_aruco(aruco_num, target_direction, try_count, deadline)
                 if not ok:
-                    print("angle: 재탐색 실패")
+                    _log("angle: 재탐색 실패")
                     return False
             time.sleep(SLEEP_TIME_AFTER_MOVE)
             continue
@@ -823,7 +837,7 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
     last_z, last_step = None, None
     while True:
         if time.time() > deadline:
-            print(f"[timeout] 마커 {aruco_num} 거리 접근 {timeout}초 초과, 여기서 멈춤")
+            _log(f"[timeout] 마커 {aruco_num} 거리 접근 {timeout}초 초과, 여기서 멈춤")
             break
 
         arrived, distance_direction, z_now = check_distance(aruco_num, target_z)
@@ -844,10 +858,10 @@ def track_target_aruco_marker(aruco_num, target_pose, try_count=0, timeout=MARKE
 
         if distance_direction is None:
             not_detected_count += 1
-            print("distance detection failed", not_detected_count)
+            _log("distance detection failed", not_detected_count)
             if not_detected_count >= 3:
                 if last_z is not None:
-                    print(f"마커를 놓쳤다. 마지막으로 본 거리 {last_z:.0f}cm "
+                    _log(f"마커를 놓쳤다. 마지막으로 본 거리 {last_z:.0f}cm "
                           f"(목표 {target_z}cm)")
                 break
             time.sleep(SLEEP_TIME_AFTER_MOVE)
@@ -892,7 +906,7 @@ def after_target_do_list(index):
             # 마커를 잡았을 때 실제로 잰 거리를 쓴다.
             z = _last_arrival_z
             if z is None:
-                print("  마커 거리를 모른다 — 전진 생략")
+                _log("  마커 거리를 모른다 — 전진 생략")
             else:
                 extra = 0 if option_inside == DEFAULT else option_inside
                 done = target_list[index].get("hop") or 0
@@ -903,7 +917,7 @@ def after_target_do_list(index):
                     move_forward_on_road(remain / MOVE_FORWARD_PER_ONE)
                 else:
                     # END_EXTRA_CM 이 음수라 도달 가능한 분기다.
-                    print(f"  !! 전진량이 {remain:.0f}cm — END 동작을 건너뛴다. "
+                    _log(f"  !! 전진량이 {remain:.0f}cm — END 동작을 건너뛴다. "
                           f"마커10 을 너무 가깝게 쟀다(z={z:.0f})")
         elif action_inside == CHECK_NEXT:
             # 과수원을 보고 돌아오는 회전 중간에서 다음 마커를 본다.
@@ -915,7 +929,7 @@ def after_target_do_list(index):
                     globals()["_last_arrival_id"] = nxt
                     print(f"  다음 마커 {nxt} 확인 (x={seen[0][1]:+.0f} z={seen[0][3]:.0f})")
                 else:
-                    print(f"  다음 마커 {nxt} 안 보임 — 외운 거리로 간다")
+                    _log(f"  다음 마커 {nxt} 안 보임 — 외운 거리로 간다")
         elif action_inside == CROSS_WALK_WAIT:
             wait = 0.5 if option_inside == DEFAULT else option_inside
             print(f"횡단보도 {wait}초 대기")
@@ -972,7 +986,7 @@ def teardown():
             if dev is not None:
                 dev.close()
         except Exception as e:
-            print("close 실패:", e)
+            _log("close 실패:", e)
 
 
 # ================================================================ 메인 주행
@@ -1015,9 +1029,11 @@ def run_course():
                 # 직전 구간의 CHECK_NEXT 가 이미 이 마커를 실측해 뒀으면 그게 더 정확하다.
                 globals()["_last_arrival_z"] = target_list[i]["pose"][1]
                 globals()["_last_arrival_id"] = current_id
-            print(f"  마커 {current_id} " + (
-                f"확인 (x={seen[0][1]:+.0f} z={seen[0][3]:.0f})" if result
-                else "안 보임 — 그래도 외운 거리로 간다"))
+            if result:
+                print(f"  마커 {current_id} 확인 "
+                      f"(x={seen[0][1]:+.0f} z={seen[0][3]:.0f})")
+            else:
+                _log(f"  마커 {current_id} 안 보임 — 외운 거리로 간다")
             if deg:
                 turn_deg(-deg)          # 튼 만큼 되돌린다. 방향은 도로가 정한다
             _cal.append((current_id, cm, target_list[i]["pose"][1],
@@ -1037,7 +1053,7 @@ def run_course():
         if not result:
             # 평가는 "어디까지 갔나" 로 그룹이 갈린다 (메인도로 E < 교차로1 D < 과수원 C < 도착 B < 하차장 A). 마커 하나
             # 놓쳤다고 전체를 포기하면 그룹이 내려간다.
-            print(f"!! 마커 {current_id} 실패 — 남은 거리만 마저 가고 진행")
+            _log(f"!! 마커 {current_id} 실패 — 남은 거리만 마저 가고 진행")
             if cm:
                 move_forward_on_road(cm * (1 - APPROACH_BLIND_RATIO) / MOVE_FORWARD_PER_ONE)
 
@@ -1055,7 +1071,7 @@ def run_course():
     print(" 마커   cm   목표z    실제z   마커~교차로 여유")
     for mid, cm, tz, az, ok in _cal:
         if az is None:
-            print(f" {mid:>4}  {cm:>4}   {tz:>4}    ----   마커 실패 — cm 이 너무 길거나 짧다")
+            _log(f" {mid:>4}  {cm:>4}   {tz:>4}    ----   마커 실패 — cm 이 너무 길거나 짧다")
             continue
         # 이제 전부 confirm 이라 z 는 "구간 시작에서 마커까지" 다.
         hop_now = next(t["hop"] for t in target_list if t["id"] == mid)
