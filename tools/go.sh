@@ -67,7 +67,7 @@ if ! robot_up "$IF"; then
   # 저장된 프로필을 올린다. `dev wifi connect` 를 쓰면 실패할 때마다 프로필이
   # 하나씩 새로 생기고, 새 프로필은 USB 고정이 안 걸려 있어 내장 카드를 물 수 있다.
   nmcli con up "$AP" ifname "$IF" >/dev/null 2>&1 \
-    || nmcli dev wifi connect "$AP" password pinkypro ifname "$IF" >/dev/null 2>&1
+    || nmcli dev wifi connect "$AP" password wcrc2026pinky ifname "$IF" >/dev/null 2>&1
   for _ in 1 2 3 4 5 6; do robot_up "$IF" && break; sleep 1; done
   robot_up "$IF" || die "로봇($AP / 192.168.4.1)에 못 붙었다. 로봇 전원과 USB 를 확인할 것."
 fi

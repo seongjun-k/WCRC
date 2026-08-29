@@ -103,7 +103,7 @@ ssh "$DEST" "cd ~/WCRC && timeout 90 .venv/bin/python tools/serve.py --selftest"
 
 grn "완료. 남은 건 팀원 노트북에서 직접 해야 한다 (로봇이 옆에 있을 때):"
 cat <<'TODO'
-  1) 로봇 AP 에 붙는다:  nmcli dev wifi connect pinky_1186 password pinkypro
+  1) 로봇 AP 에 붙는다:  nmcli dev wifi connect pinky_1186 password wcrc2026pinky
   2) 로봇 ssh 키 (한 번만. 비밀번호는 1):
        ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519   # 이미 있으면 건너뛴다
        ssh-copy-id pinky@192.168.4.1

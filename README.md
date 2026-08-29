@@ -7,11 +7,11 @@
 
 ## 0. 먼저 로봇 Wi-Fi에 연결
 
-내 로봇은 **`pinky_1186`** (비번 `pinkypro`). 로봇이 자기 AP를 쏘고 있고, 이 AP에 붙어야 접속된다.
+내 로봇은 **`pinky_1186`** (비번 `wcrc2026pinky`). 로봇이 자기 AP를 쏘고 있고, 이 AP에 붙어야 접속된다.
 로봇 주소는 `192.168.4.1` 고정.
 
 ```bash
-nmcli dev wifi connect pinky_1186 password pinkypro
+nmcli dev wifi connect pinky_1186 password wcrc2026pinky
 probot check             # 접속 확인 (계정=pinky 호스트=raspi 가 나오면 성공)
 ```
 
@@ -131,7 +131,7 @@ probot check             # 로봇 연결 점검
 |---|---|
 | `카메라를 찾을 수 없습니다. 케이블을...` | **케이블 문제가 아니다.** 브라우저를 닫아도 남은 Jupyter 커널이 카메라·모터를 물고 있는 것. `pinky-free` 실행 |
 | `현재 카메라가 사용 중입니다` | 같은 원인. `pinky-free` |
-| 로봇 접속 안 됨 | AP 연결이 끊긴 것. `nmcli dev wifi connect pinky_1186 password pinkypro` 후 `probot check` |
+| 로봇 접속 안 됨 | AP 연결이 끊긴 것. `nmcli dev wifi connect pinky_1186 password wcrc2026pinky` 후 `probot check` |
 | 다른 로봇에 붙은 것 같다 | `pinky 'iw dev \| grep ssid'` 로 AP 이름 확인. `pinky_1186` 이 아니면 잘못 붙은 것 |
 | 촬영이 안 멈춘다 | `Ctrl+C`, 안 되면 `pinky-stop` |
 | 주행이 안 멈춘다 | `Ctrl+C`, 안 되면 `pinky-kill` |
