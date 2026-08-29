@@ -4,8 +4,7 @@ __pycache__/
 .venv/
 
 # 사전학습 가중치 — ultralytics 가 필요할 때 다시 받는다
-yolov8s.pt
-yolo26n.pt
+pt_file/
 
 # 학습·서버 산출물. 데이터셋(apple/, raw/)이 있으면 `wtrain` 으로 다시 만든다.
 # 단 실전에 쓰는 best.pt 하나만 예외로 커밋한다 (아래 !)
@@ -34,3 +33,5 @@ redlabel_check.jpg
 
 # ultralytics 가 만드는 데이터셋 캐시
 *.cache
+tools/tune_shots/
+tools/tune.json

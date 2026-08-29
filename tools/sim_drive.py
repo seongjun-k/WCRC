@@ -240,15 +240,17 @@ def demo():
     check_undefined_names()
 
     N = len(drive.target_list)
-    # 과수원 3곳 x APPLE_CHECK_COUNT 장. 각 묶음에 일부러 튀는 값을 하나씩 섞었다
-    # (오탐 1장, 누락 1장). drive.py 는 중앙값을 쓰므로 여기에 흔들리면 안 된다.
+    # 과수원 3곳 x APPLE_CHECK_COUNT 장. drive.py 는 최댓값을 쓴다 (중앙값이 실제
+    # 개수를 과소평가해서 2026-08-28 되돌렸다 — 사과 4개인데 2개로 잡힌 사례).
+    # 그래서 오탐(과다) 프레임은 그대로 최댓값에 반영되고, 누락(과소) 프레임은
+    # 같은 묶음의 다른 정상 프레임이 구제해준다.
     K = drive.APPLE_CHECK_COUNT
-    GROUPS = [[1, 1, 2, 1, 1],      # 오탐 1장 -> 정답 1
-              [3, 3, 3, 4, 3],      # 오탐 1장 -> 정답 3
-              [2, 2, 2, 2, 0]][:3]  # 누락 1장 -> 정답 2
+    GROUPS = [[1, 1, 2, 1, 1],      # K=3 으로 자르면 [1,1,2] -> 최댓값 2 (오탐이 반영된다)
+              [3, 3, 3, 4, 3],      # K=3 으로 자르면 [3,3,3] -> 최댓값 3 (4번째는 안 쓰인다)
+              [2, 2, 2, 2, 0]][:3]  # K=3 으로 자르면 [2,2,2] -> 최댓값 2 (누락은 구제된다)
     GROUPS = [(g * K)[:K] if len(g) < K else g[:K] for g in GROUPS]
     COUNTS = [c for g in GROUPS for c in g]
-    EXPECT = sum(sorted(g)[len(g) // 2] for g in GROUPS)
+    EXPECT = sum(max(g) for g in GROUPS)
     ERR = [10, -15, 20, -10, 15, -20, 10, -15, 5, 0][:N]
     # map.png 실측 구간거리(cm) + 마커는 정지점보다 pose[1] 만큼 더 앞
     DIST = [t["cm"] + t["pose"][1] for t in drive.target_list]

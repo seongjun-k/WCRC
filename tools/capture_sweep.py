@@ -1,6 +1,7 @@
 """과수원 앞에서 학습용 사진을 모은다. 로봇에서 실행한다.
 
-    python3 capture_sweep.py [태그]        # 태그로 과수원 A/B/C 구분
+    python3 capture_sweep.py [태그]              # 태그로 과수원 A/B/C 구분. 폴더는 자동(날짜_횟수)
+    python3 capture_sweep.py [태그] [저장폴더]    # 폴더를 직접 지정 (여러 과수원을 한 폴더에 모으고 싶을 때)
 
 이동 제약: 전진은 최대 5cm 까지만 하고 반드시 되돌아온다.
 변화는 대부분 제자리 회전으로 만든다 (회전은 병진이 없어 자리를 안 벗어난다).
@@ -15,14 +16,29 @@ import cv2
 sys.path.insert(0, '/home/pinky')
 import drive
 
+BASE = "/home/pinky/raw/images"
+
+
+def make_run_dir():
+    """실행마다 새 폴더. 이름은 YYYYMMDD_횟수 (그날 몇 번째 촬영인지)."""
+    os.makedirs(BASE, exist_ok=True)
+    day = time.strftime("%Y%m%d")
+    n = sum(1 for d in os.listdir(BASE)
+            if d.startswith(day) and os.path.isdir(os.path.join(BASE, d))) + 1
+    path = os.path.join(BASE, f"{day}_{n}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 TAG   = sys.argv[1] if len(sys.argv) > 1 else "a"
-OUT   = "/home/pinky/raw/images"
+OUT   = sys.argv[2] if len(sys.argv) > 2 else make_run_dir()
 NEAR  = 5.0                                  # 전진 허용 한계(cm)
 ANGLES = list(range(-20, 21, 4))             # -20 ~ +20 도, 4도 간격 (11자세)
 SHOTS  = 4
 NEG    = 20
 
 os.makedirs(OUT, exist_ok=True)
+print(f"저장 폴더 {OUT}")
 drive.setup(motors=True)
 n = 0
 def shot():

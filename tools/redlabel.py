@@ -23,7 +23,8 @@ import sys
 import cv2
 import numpy as np
 
-AREA_MIN, AREA_MAX = 800, 9000
+AREA_MIN, AREA_MAX = 120, 9000   # capture_sweep 사진은 로봇이 더 멀어서 사과가 100~360px^2 로 잡혔다
+                                  # (2026-08-28). 800 은 근접 촬영 기준이라 전부 걸러졌었다.
 ASPECT = (0.6, 1.7)          # 사과는 대략 원형
 FILL_MIN = 0.55              # 외접 사각형을 채우는 비율 (완전한 원 = 0.785)
 Y_TOP = 0.62                 # 이 아래쪽(바닥)은 버린다
@@ -33,8 +34,9 @@ def find_apples(im):
     h, w = im.shape[:2]
     hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
     # 빨강은 H 가 0 과 179 양쪽 끝에 걸쳐 있어 두 번 뽑아 합친다
-    m = (cv2.inRange(hsv, np.array([0, 120, 80]), np.array([10, 255, 255])) |
-         cv2.inRange(hsv, np.array([170, 120, 80]), np.array([179, 255, 255])))
+    # S/V 하한도 100/65 로 살짝 낮췄다 — 실측 사과 픽셀이 S 110~ V 70~ 이라 120/80 이면 빠졌다.
+    m = (cv2.inRange(hsv, np.array([0, 100, 65]), np.array([10, 255, 255])) |
+         cv2.inRange(hsv, np.array([170, 100, 65]), np.array([179, 255, 255])))
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     n, _, st, _ = cv2.connectedComponentsWithStats(m, 8)
@@ -123,9 +125,9 @@ def _save(tiles, page):
     cv2.imwrite(f"labelcheck/page{page:02d}.jpg", np.vstack(rows))
 
 
-def main(root="raw", check=False, force=False):
-    imgs = sorted(glob.glob(f"{root}/images/*.jpg"))
-    assert imgs, f"{root}/images 에 jpg 가 없다"
+def main(root="raw", pat="*", check=False, force=False):
+    imgs = sorted(glob.glob(f"{root}/images/{pat}.jpg"))
+    assert imgs, f"{root}/images/{pat}.jpg 없음"
     os.makedirs(f"{root}/labels", exist_ok=True)
     hist, skipped = {}, 0
     for f in imgs:
@@ -148,7 +150,8 @@ def main(root="raw", check=False, force=False):
 if __name__ == "__main__":
     a = [x for x in sys.argv[1:] if not x.startswith("-")]
     root = a[0] if a else "raw"
+    pat = a[1] if len(a) > 1 else "*"
     if "--check" in sys.argv:
-        sheets(root, a[1] if len(a) > 1 else "*")
+        sheets(root, pat)
     else:
-        main(root, force="--force" in sys.argv)
+        main(root, pat, force="--force" in sys.argv)
