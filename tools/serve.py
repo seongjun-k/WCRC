@@ -16,6 +16,7 @@ import time
 os.environ.setdefault("YOLO_OFFLINE", "1")
 
 import cv2                                # noqa: E402
+import numpy as np                        # noqa: E402
 
 _TUNE = {}
 try:
@@ -28,8 +29,18 @@ except (OSError, ValueError):
 # ---------------------------------------------------------------- 튜닝 값
 # tune.json 이 있으면 그 값, 없으면 여기 기본값. 손으로 고쳐도 된다.
 CROP_RATIO = _TUNE.get("ratio", 0.75)   # 프레임 위쪽 몇 %만 쓸지 (아래는 도로)
-CROP_SCALE = _TUNE.get("scale", 2)      # 몇 배로 키워서 추론할지. 사과가 작으면 올린다
+CROP_SCALE = _TUNE.get("scale", 1)      # 1 로 둔다. imgsz 640 에서는 아무 효과가 없고
+                                        # (ultralytics 가 어차피 imgsz 로 되돌린다),
+                                        # imgsz 를 올린 지금은 오히려 해롭다 — 큐빅으로
+                                        # 한 번 늘렸다 다시 줄이면 작은 사과가 뭉갠다.
+                                        # x3 -> x1 로 바꾸니 과수원A/C 가 0 에서 1 이 됐다
+                                        # (2026-08-29 대회장 사진 18장)
 CLAHE_CLIP = _TUNE.get("clip", 3.0)     # 그늘 대비 보정 세기. 0 이면 안 쓴다
+GAMMA = _TUNE.get("gamma", 1.0)         # 1보다 크면 밝게. 대회장은 흰 바닥·초록 매트에
+                                        # 노출이 맞춰져 빨간 사과가 거의 검게 찍힌다
+                                        # (사과 V=58~91 vs 화면 평균 V=167~198,
+                                        # 2026-08-29 실측). CLAHE 는 국소 대비라
+                                        # 이걸 못 살리고, 감마로 들어올려야 잡힌다.
 NMS_IOU = _TUNE.get("iou", 0.6)         # app.py 는 iou 를 안 줘서 기본 0.7 이 된다
 CONF = _TUNE.get("conf")                # None 이면 app.py 가 준 0.25 를 그대로
 IMGSZ = _TUNE.get("imgsz", 1280)        # 추론 입력 해상도. 사과가 작으면 이걸 올린다.
@@ -37,6 +48,14 @@ IMGSZ = _TUNE.get("imgsz", 1280)        # 추론 입력 해상도. 사과가 작
                                         # 줄이므로 x1 과 x3 의 결과가 완전히 같았다
                                         # (2026-08-29 대회장 사진으로 확인). 실제 레버는
                                         # scale 이 아니라 여기다.
+
+
+def _brighten(img, g=GAMMA):
+    """어둡게 찍힌 사과를 들어올린다. g=1 이면 아무것도 안 한다."""
+    if g == 1.0:
+        return img
+    lut = np.array([((i / 255.0) ** (1.0 / g)) * 255 for i in range(256)], np.uint8)
+    return cv2.LUT(img, lut)
 
 
 def _local_contrast(img, clip=CLAHE_CLIP):
@@ -69,7 +88,7 @@ class _CropModel:
         top = im[:int(im.shape[0] * self._r)]
         big = cv2.resize(top, None, fx=self._s, fy=self._s,
                          interpolation=cv2.INTER_CUBIC)
-        return self._m(_local_contrast(big), **kw)
+        return self._m(_local_contrast(_brighten(big)), **kw)
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -121,7 +140,7 @@ print(f"모델   {server.selected_pt_file}")
 print(f"클래스 {server.loaded_model.names}")
 print(f"결과   {server.DIR_PREDICT}")
 print(f"전처리 상단 {CROP_RATIO:.0%} 크롭 x{CROP_SCALE} + CLAHE {CLAHE_CLIP} "
-      f"· imgsz {IMGSZ} · NMS iou {NMS_IOU} "
+      f"· 감마 {GAMMA} · imgsz {IMGSZ} · NMS iou {NMS_IOU} "
       f"· conf {CONF if CONF is not None else '0.25(app.py)'}"
       + ("  (tune.json)" if _TUNE else "  (기본값)"))
 print()
