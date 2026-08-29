@@ -67,8 +67,13 @@ def load(paths, scale):
     return out
 
 
-def median(xs):
-    return sorted(xs)[len(xs) // 2] if xs else 0
+def adopt(xs):
+    """drive.py 와 같은 채택 규칙. 중앙값이 아니라 최댓값이다 (2026-08-29).
+
+    drive.py 는 2026-08-28 실주행에서 4개가 2개로 묻힌 뒤 max 로 바꿨는데 여기만
+    median 으로 남아 있었다. 서로 다른 걸 최적화하면 튜닝 결과가 실제와 어긋난다.
+    """
+    return max(xs) if xs else 0
 
 
 def main(argv):
@@ -108,7 +113,7 @@ def main(argv):
                         cs.append(len(b))
                         for x in b:
                             margin = min(margin, float(x.conf) - conf)
-                    per[k] = median(cs)
+                    per[k] = adopt(cs)
                 hit = sum(per[k] == t for k, t in zip(keys, truth)) if truth else -1
                 rows.append((hit, margin, scale, clip, iou, conf, per))
                 print(f"  x{scale} clip={str(clip):<4} iou={iou} conf={conf}  "
