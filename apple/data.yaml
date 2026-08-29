@@ -1,6 +1,12 @@
-path: /home/lsk0522/WCRC/apple
+# WCRC 사과 인식 데이터셋 (로컬 학습: RTX 4060 Laptop)
+# 다른 PC로 옮기면 path 만 그 폴더의 절대경로로 바꾼다.
+path: /home/ksj/orca/projects/WCRC/apple
+
 train: train/images
 val: val/images
+
+# 서버(app.py)는 박스 "개수"만 세고 클래스는 쓰지 않는다.
+# red/green 2클래스로 하면 같은 사과에 두 박스가 겹쳐 개수가 부풀 수 있어 1클래스로 간다.
 nc: 1
 names:
   - apple
