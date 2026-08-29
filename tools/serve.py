@@ -32,6 +32,11 @@ CROP_SCALE = _TUNE.get("scale", 2)      # 몇 배로 키워서 추론할지. 사
 CLAHE_CLIP = _TUNE.get("clip", 3.0)     # 그늘 대비 보정 세기. 0 이면 안 쓴다
 NMS_IOU = _TUNE.get("iou", 0.6)         # app.py 는 iou 를 안 줘서 기본 0.7 이 된다
 CONF = _TUNE.get("conf")                # None 이면 app.py 가 준 0.25 를 그대로
+IMGSZ = _TUNE.get("imgsz", 1280)        # 추론 입력 해상도. 사과가 작으면 이걸 올린다.
+                                        # scale 로 키워봐야 ultralytics 가 다시 imgsz 로
+                                        # 줄이므로 x1 과 x3 의 결과가 완전히 같았다
+                                        # (2026-08-29 대회장 사진으로 확인). 실제 레버는
+                                        # scale 이 아니라 여기다.
 
 
 def _local_contrast(img, clip=CLAHE_CLIP):
@@ -55,6 +60,7 @@ class _CropModel:
     def __call__(self, source, **kw):
         # 크롭을 못 해도 아래 둘은 적용돼야 한다 — 전처리와 무관한 설정이다.
         kw.setdefault("iou", NMS_IOU)      # app.py 가 안 주는 값
+        kw.setdefault("imgsz", IMGSZ)      # app.py 가 안 주는 값 (기본 640)
         if CONF is not None:
             kw["conf"] = CONF              # app.py 가 준 0.25 를 덮어쓴다
         im = cv2.imread(source) if isinstance(source, str) else source
@@ -115,7 +121,8 @@ print(f"모델   {server.selected_pt_file}")
 print(f"클래스 {server.loaded_model.names}")
 print(f"결과   {server.DIR_PREDICT}")
 print(f"전처리 상단 {CROP_RATIO:.0%} 크롭 x{CROP_SCALE} + CLAHE {CLAHE_CLIP} "
-      f"· NMS iou {NMS_IOU} · conf {CONF if CONF is not None else '0.25(app.py)'}"
+      f"· imgsz {IMGSZ} · NMS iou {NMS_IOU} "
+      f"· conf {CONF if CONF is not None else '0.25(app.py)'}"
       + ("  (tune.json)" if _TUNE else "  (기본값)"))
 print()
 
@@ -138,6 +145,7 @@ def selftest():
     exp = (int(480 * CROP_RATIO) * CROP_SCALE, 640 * CROP_SCALE, 3)
     assert seen["got"] == exp, seen
     assert seen["kw"]["iou"] == NMS_IOU, seen         # NMS 를 조여서 넘긴다
+    assert seen["kw"]["imgsz"] == IMGSZ, seen        # 작은 사과용 입력 해상도
     assert p.names == {0: "apple"}                    # 감싼 뒤에도 속성이 보인다
     p("없는파일.jpg")                                  # 못 읽으면 원본 경로 그대로 넘긴다
     assert seen["got"] == "없는파일.jpg", seen
