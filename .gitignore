@@ -35,3 +35,6 @@ redlabel_check.jpg
 *.cache
 tools/tune_shots/
 tools/tune.json
+
+# Claude Code 로컬 세션·설정 (프로젝트 산출물 아님)
+.claude/

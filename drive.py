@@ -81,7 +81,10 @@ DEFAULT = 999             # 시간 옵션이 필요 없는 동작
 SEARCH_MOTOR_SPEED = 65
 
 # 제자리 회전은 시간이 아니라 각도로 지정하고 IMU(BNO055)로 닫는다.
-TURN_COAST_PER_SPEED = 0.228   # 모터를 끈 뒤 관성으로 더 도는 양. 실측
+TURN_COAST_PER_SPEED = 0.248   # 모터를 끈 뒤 관성으로 더 도는 양. 실측
+                               # 2026-08-29 경기장 매트에서 재측정: 학교바닥 0.228 은
+                               # 여기선 매회 +1.4도 초과(90x4 누적 +5.6). 매트가 덜 미끄러워
+                               # coast 가 커서 0.248 로 올림 (초과 ~0 수렴).
 TURN_COAST_RATIO = 0.30        # coast 가 목표각의 이 비율을 넘지 않게 속도를 정한다
 TURN_MIN_SPEED = 10
 TURN_SETTLE_BASE = 0.10        # 회전 뒤 대기 = BASE + PER_SPEED * speed

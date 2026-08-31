@@ -35,6 +35,12 @@ CROP_SCALE = _TUNE.get("scale", 1)      # 1 로 둔다. imgsz 640 에서는 아�
                                         # 한 번 늘렸다 다시 줄이면 작은 사과가 뭉갠다.
                                         # x3 -> x1 로 바꾸니 과수원A/C 가 0 에서 1 이 됐다
                                         # (2026-08-29 대회장 사진 18장)
+SIDE_CROP = _TUNE.get("side", 0.15)     # 박스 중심이 좌/우 이 비율 안에 들면 버린다.
+                                        # 로봇이 90도 돌아 대상 나무를 가운데 두는데,
+                                        # 양옆 끝에 옆 과수원 나무가 걸려 오탐이 났다
+                                        # (2026-08-29 142110 과수원C: 옆나무 사과를 셈).
+                                        # 픽셀로 자르면 리스케일 탓에 딴 오탐이 생겨서
+                                        # 추론은 전체로 하고 결과 박스만 중심으로 거른다.
 CLAHE_CLIP = _TUNE.get("clip", 3.0)     # 그늘 대비 보정 세기. 0 이면 안 쓴다
 GAMMA = _TUNE.get("gamma", 1.0)         # 1보다 크면 밝게. 대회장은 흰 바닥·초록 매트에
                                         # 노출이 맞춰져 빨간 사과가 거의 검게 찍힌다
@@ -67,6 +73,20 @@ def _local_contrast(img, clip=CLAHE_CLIP):
     return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
+def _drop_side(res, w):
+    """중심이 좌/우 SIDE_CROP 안에 든 박스는 옆 나무라 버린다. 추론은 이미 전체로 끝났고
+    여기선 결과만 거르므로 가운데 사과 인식엔 전혀 영향이 없다."""
+    if SIDE_CROP <= 0 or not res:
+        return res
+    b = getattr(res[0], "boxes", None)
+    if b is None or len(b) == 0:
+        return res
+    cx = ((b.xyxy[:, 0] + b.xyxy[:, 2]) / 2) / w
+    keep = (cx >= SIDE_CROP) & (cx <= 1 - SIDE_CROP)
+    res[0] = res[0][keep]
+    return res
+
+
 class _CropModel:
     """모델 앞에 전처리만 끼우는 얇은 프록시. 나머지 속성은 그대로 넘긴다."""
 
@@ -88,7 +108,8 @@ class _CropModel:
         top = im[:int(im.shape[0] * self._r)]
         big = cv2.resize(top, None, fx=self._s, fy=self._s,
                          interpolation=cv2.INTER_CUBIC)
-        return self._m(_local_contrast(_brighten(big)), **kw)
+        fed = _local_contrast(_brighten(big))
+        return _drop_side(self._m(fed, **kw), fed.shape[1])
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -141,6 +162,7 @@ print(f"클래스 {server.loaded_model.names}")
 print(f"결과   {server.DIR_PREDICT}")
 print(f"전처리 상단 {CROP_RATIO:.0%} 크롭 x{CROP_SCALE} + CLAHE {CLAHE_CLIP} "
       f"· 감마 {GAMMA} · imgsz {IMGSZ} · NMS iou {NMS_IOU} "
+      f"· 좌우 {SIDE_CROP:.0%} 버림 "
       f"· conf {CONF if CONF is not None else '0.25(app.py)'}"
       + ("  (tune.json)" if _TUNE else "  (기본값)"))
 print()
